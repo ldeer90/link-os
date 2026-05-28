@@ -1,0 +1,2 @@
+client_domain,competitor_domain,source_domain,source_url,target_url,anchor_text,link_type,first_seen,last_seen,domain_metric_name,domain_metric_value,traffic_metric,provider,source_file_or_api_run
+example-client.com.au,competitor.com.au,examplepublisher.com.au,https://examplepublisher.com.au/sample-article,https://competitor.com.au/product,example anchor,dofollow,2026-05-01,2026-05-20,DR,42,1200,csv_sample,sample.csv

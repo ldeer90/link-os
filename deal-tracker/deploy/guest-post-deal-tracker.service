@@ -1,0 +1,16 @@
+[Unit]
+Description=Guest Post Deal Tracker
+After=network.target
+
+[Service]
+Type=simple
+User=guestpost
+Group=guestpost
+WorkingDirectory=/opt/guest-post-deal-tracker
+EnvironmentFile=-/opt/guest-post-deal-tracker/.env
+ExecStart=/opt/guest-post-deal-tracker/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8766
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+deals.example.com {
+	reverse_proxy 127.0.0.1:8766
+	encode gzip
+}
+
+# Temporary IP-only access before DNS is ready:
+# :80 {
+# 	reverse_proxy 127.0.0.1:8766
+# 	encode gzip
+# }

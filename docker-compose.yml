@@ -1,0 +1,41 @@
+services:
+  deal-tracker:
+    build:
+      context: ./deal-tracker
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8766
+    environment:
+      INSTANTLY_API_KEY: ${INSTANTLY_API_KEY:-}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-change-this-to-a-long-random-string}
+      APP_BOOTSTRAP_ADMIN_EMAIL: ${APP_BOOTSTRAP_ADMIN_EMAIL:-admin@link-os.local}
+      APP_BOOTSTRAP_ADMIN_PASSWORD: ${APP_BOOTSTRAP_ADMIN_PASSWORD:-change-me-now}
+      SYNC_INTERVAL_DAYS: ${SYNC_INTERVAL_DAYS:-3}
+    ports:
+      - "8766:8766"
+    volumes:
+      - link_os_deal_data:/app/data
+      - ./deal-tracker/generated:/app/generated
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  prospecting:
+    build:
+      context: ./prospecting
+    command: python -c "print('Prospecting container ready. Run a tool command with docker compose run --rm prospecting python tools/...')"
+    environment:
+      INSTANTLY_API_KEY: ${INSTANTLY_API_KEY:-}
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      APIFY_TOKEN: ${APIFY_API_TOKEN:-}
+      SE_RANKING_API_KEY: ${SE_RANKING_API_KEY:-}
+      SEMRUSH_API_KEY: ${SEMRUSH_API_KEY:-}
+      AHREFS_API_KEY: ${AHREFS_API_KEY:-}
+    volumes:
+      - link_os_prospecting_data:/app/data
+      - ./prospecting/generated:/app/generated
+
+volumes:
+  link_os_deal_data:
+  link_os_prospecting_data:

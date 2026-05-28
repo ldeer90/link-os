@@ -1,0 +1,2 @@
+root_domain,site_name,contact_email,publisher_cost_amount,publisher_cost_currency,reseller_price_amount,reseller_price_currency,placement_type,turnaround_time,admin_review_status,is_listed
+examplepublisher.com.au,Example Publisher,editor@examplepublisher.com.au,100,AUD,200,AUD,sponsored_post,3 business days,approved,true

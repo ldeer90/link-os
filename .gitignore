@@ -1,0 +1,41 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# SQLite/runtime data
+**/data/*.db
+**/data/*.db-*
+**/data/**/*.db
+**/data/**/*.db-*
+**/data/**/*.sqlite
+**/data/**/*.sqlite-*
+**/data/raw_domains/search_cache/*
+**/data/crawls/*
+**/data/contact_discovery/*
+!**/data/.gitkeep
+!**/data/raw_domains/.gitkeep
+!**/data/raw_domains/search_cache/.gitkeep
+!**/data/crawls/.gitkeep
+!**/data/contact_discovery/.gitkeep
+
+# Generated private exports and lead data
+**/generated/**/*
+!**/generated/.gitkeep
+!**/generated/**/.gitkeep
+
+# Local deploy/runtime artifacts
+*.log
+*.pid
+*.backup
+*.bak
