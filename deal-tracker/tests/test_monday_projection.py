@@ -134,6 +134,7 @@ class LegacySchemaMonday(FakeMonday):
                 {"id": "Link Insert Cost", "title": "Link Insert Cost", "type": "numbers"},
                 _status_column("Link Insert Currency", "AUD", "USD", "GBP"),
                 {"id": "Link Insert Reseller", "title": "Link Insert Reseller", "type": "numbers"},
+                {"id": "Private Notes", "title": "Private Notes", "type": "long_text"},
                 _status_column("Review Status", "approved", "needs_review"),
                 {"id": "Local Deal ID", "title": "Local Deal ID", "type": "numbers"},
                 {"id": "Last Seen", "title": "Last Seen", "type": "date"},
@@ -211,6 +212,32 @@ def _seed_approved_projection(session) -> tuple[Offer, PublisherEntity]:
     session.add(offer)
     session.commit()
     return offer, publisher
+
+
+def test_projection_qualifies_operator_assumed_currency() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(engine, expire_on_commit=False)
+
+    with Session() as session:
+        offer, _publisher = _seed_approved_projection(session)
+        offer.extracted_terms = {
+            "alignment": {
+                "currency_basis": (
+                    "USD assumed by operator for currency-ambiguous $ quote"
+                )
+            }
+        }
+        session.commit()
+
+        inventory = next(
+            row for row in projection_rows(session) if row.entity_id == offer.id
+        )
+        assert inventory.values["Private Notes"] == (
+            "Currency qualification: USD is an operator assumption; "
+            "the publisher communication used an unqualified $ amount "
+            "and did not explicitly confirm the currency."
+        )
 
 
 def test_projection_reuses_legacy_mapping_and_writes_sync_log() -> None:

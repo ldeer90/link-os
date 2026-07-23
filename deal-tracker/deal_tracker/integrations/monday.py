@@ -47,6 +47,7 @@ BOARD_COLUMNS = {
         ("Link Insert Cost", "numbers"),
         ("Link Insert Currency", "text"),
         ("Link Insert Reseller", "numbers"),
+        ("Private Notes", "long_text"),
         ("Review Status", "text"),
         ("Local Offer ID", "text"),
         ("Last Synced", "date"),
@@ -95,6 +96,7 @@ OPTIONAL_COLUMNS = {
     ("inventory", "Link Insert Cost"),
     ("inventory", "Link Insert Currency"),
     ("inventory", "Link Insert Reseller"),
+    ("inventory", "Private Notes"),
     ("entities", "Local Entity ID"),
     ("replies", "Local Reply ID"),
 }
@@ -261,6 +263,37 @@ def projection_rows(session: Session) -> list[ProjectionRow]:
             select(MondayMapping.id).where(MondayMapping.stable_key == inventory_key)
         ) is not None
         if offer.status == OfferStatus.APPROVED or inventory_was_projected:
+            inventory_values: dict[str, Any] = {
+                "Root Domain": domain.normalized_domain,
+                "Contact Email": email,
+                "Deal Status": offer.status.value,
+                "Placement Type": offer.placement_type or "",
+                "Publisher Cost": float(offer.original_amount) if offer.original_amount is not None else "",
+                "Publisher Currency": offer.original_currency or "",
+                "Reseller Price": float(offer.reseller_price_aud) if offer.reseller_price_aud is not None else "",
+                "Reseller Currency": "AUD" if offer.reseller_price_aud is not None else "",
+                # Canonical LINK OS projects one placement per row. Clear
+                # the legacy combined-offer columns so an old link-edit
+                # price cannot conflict with its canonical niche-edit row.
+                "Link Insert Cost": "",
+                "Link Insert Currency": "",
+                "Link Insert Reseller": "",
+                "Review Status": offer.status.value,
+                "Local Offer ID": offer.id,
+                "Last Synced": now,
+            }
+            currency_basis = str(
+                ((offer.extracted_terms or {}).get("alignment") or {}).get(
+                    "currency_basis"
+                )
+                or ""
+            ).strip()
+            if currency_basis:
+                inventory_values["Private Notes"] = (
+                    "Currency qualification: USD is an operator assumption; "
+                    "the publisher communication used an unqualified $ amount "
+                    "and did not explicitly confirm the currency."
+                )
             rows.append(
                 ProjectionRow(
                     board_key="inventory",
@@ -268,25 +301,7 @@ def projection_rows(session: Session) -> list[ProjectionRow]:
                     entity_id=offer.id,
                     stable_key=inventory_key,
                     name=domain.normalized_domain,
-                    values={
-                        "Root Domain": domain.normalized_domain,
-                        "Contact Email": email,
-                        "Deal Status": offer.status.value,
-                        "Placement Type": offer.placement_type or "",
-                        "Publisher Cost": float(offer.original_amount) if offer.original_amount is not None else "",
-                        "Publisher Currency": offer.original_currency or "",
-                        "Reseller Price": float(offer.reseller_price_aud) if offer.reseller_price_aud is not None else "",
-                        "Reseller Currency": "AUD" if offer.reseller_price_aud is not None else "",
-                        # Canonical LINK OS projects one placement per row. Clear
-                        # the legacy combined-offer columns so an old link-edit
-                        # price cannot conflict with its canonical niche-edit row.
-                        "Link Insert Cost": "",
-                        "Link Insert Currency": "",
-                        "Link Insert Reseller": "",
-                        "Review Status": offer.status.value,
-                        "Local Offer ID": offer.id,
-                        "Last Synced": now,
-                    },
+                    values=inventory_values,
                 )
             )
 
