@@ -8,7 +8,7 @@ from typing import Any
 from .classifier import DEAL_STATUSES, PLACEMENT_TYPES, PriceOption, classify_reply
 from .db import assign_missing_publisher_entities, connect, init_db
 from .fx import convert_to_aud
-from .instantly import DEFAULT_CAMPAIGN_IDS, list_campaign_emails, list_campaign_leads
+from .instantly import DEFAULT_CAMPAIGN_IDS, list_campaign_emails, list_campaign_leads, list_campaigns, matching_guest_post_campaigns
 from .utils import clean_domain, now_iso
 
 
@@ -46,6 +46,48 @@ def inbound_replies(campaign_id: str) -> list[dict[str, Any]]:
     return [email for email in list_campaign_emails(campaign_id) if email.get("ue_type") == INBOUND_UE_TYPE]
 
 
+def attachment_items(email: dict[str, Any]) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    for key in ("attachments", "files"):
+        raw = email.get(key)
+        if isinstance(raw, list):
+            values.extend(item for item in raw if isinstance(item, dict))
+    return values
+
+
+def sender_domain(email: str) -> str:
+    value = (email or "").strip().lower()
+    return value.rsplit("@", 1)[-1] if "@" in value else ""
+
+
+def is_agency_reply(context: dict[str, str], email: dict[str, Any], body_text: str) -> bool:
+    contact_domain = sender_domain(context["contact_email"])
+    root_domain = (context["root_domain"] or "").lower()
+    body_lower = body_text.lower()
+    if contact_domain and root_domain and contact_domain != root_domain and not contact_domain.endswith(f".{root_domain}") and not root_domain.endswith(f".{contact_domain}"):
+        return True
+    return any(marker in body_lower for marker in ("agency", "our publishers", "publisher network", "multiple publishers", "our network"))
+
+
+def review_flags(email: dict[str, Any], context: dict[str, str], body_text: str, extraction_classification: str) -> set[str]:
+    lowered = body_text.lower()
+    flags: set[str] = set()
+    if attachment_items(email):
+        flags.add("attachment_present")
+    if "media kit" in lowered or "rate card" in lowered:
+        if "$" not in body_text and "aud" not in lowered and "usd" not in lowered:
+            flags.add("media_kit_only")
+    if any(needle in lowered for needle in ("who is the client", "can you share the client", "what website is this for", "what site are you promoting")):
+        flags.add("ambiguous_domain_ownership")
+    if any(needle in lowered for needle in ("forms.gle", "docs.google.com/forms", "typeform.com", "airtable.com")):
+        flags.add("third_party_redirect")
+    if extraction_classification == "needs_review":
+        flags.add("needs_review")
+    if is_agency_reply(context, email, body_text):
+        flags.add("agency_reply")
+    return flags
+
+
 def lead_context(lead: dict[str, Any] | None, email: dict[str, Any]) -> dict[str, str]:
     lead = lead or {}
     payload = lead.get("payload") if isinstance(lead.get("payload"), dict) else {}
@@ -62,7 +104,7 @@ def lead_context(lead: dict[str, Any] | None, email: dict[str, Any]) -> dict[str
     }
 
 
-def save_reply_and_maybe_deal(campaign_id: str, email: dict[str, Any], lead: dict[str, Any] | None = None) -> bool:
+def save_reply_and_maybe_deal(campaign_id: str, email: dict[str, Any], lead: dict[str, Any] | None = None) -> dict[str, Any]:
     init_db()
     body_text = email_body_text(email)
     extraction = classify_reply(body_text)
@@ -70,18 +112,39 @@ def save_reply_and_maybe_deal(campaign_id: str, email: dict[str, Any], lead: dic
     processed_at = now_iso()
     email_id = str(email.get("id") or "")
     thread_id = str(email.get("thread_id") or "")
+    flags = review_flags(email, context, body_text, extraction.classification)
+    attachment_or_unclear = bool(flags & {"attachment_present", "media_kit_only", "ambiguous_domain_ownership", "third_party_redirect"})
+    skip_deal_creation = attachment_or_unclear or ("agency_reply" in flags and extraction.price_amount is None and not extraction.price_options)
+    result = {
+        "email_id": email_id,
+        "classification": extraction.classification,
+        "stored_reply": False,
+        "deal_created": 0,
+        "deal_updated": 0,
+        "duplicate_reply": False,
+        "ignored_acknowledgement": extraction.classification in {"auto_reply", "ignore", "rejected"},
+        "manual_review": extraction.classification == "needs_review" or skip_deal_creation,
+        "attachment_or_unclear": attachment_or_unclear,
+        "domains_changed": [],
+        "flags": sorted(flags),
+    }
 
     with connect() as connection:
+        existing_reply = connection.execute("select id from instantly_reply_sync where email_id = ?", (email_id,)).fetchone()
+        if existing_reply:
+            result["duplicate_reply"] = True
+            return result
         connection.execute(
             """
             insert into instantly_reply_sync (
                 campaign_id, email_id, lead_email, thread_id, subject, from_email, to_email,
-                body_text, received_at, classification, extracted_json, processed_at
+                body_text, received_at, classification, extracted_json, raw_json, processed_at
             )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(email_id) do update set
                 classification=excluded.classification,
                 extracted_json=excluded.extracted_json,
+                raw_json=excluded.raw_json,
                 processed_at=excluded.processed_at
             """,
             (
@@ -95,12 +158,13 @@ def save_reply_and_maybe_deal(campaign_id: str, email: dict[str, Any], lead: dic
                 body_text,
                 str(email.get("timestamp_email") or email.get("timestamp_created") or ""),
                 extraction.classification,
-                extraction.to_json(),
+                json.dumps({"extraction": json.loads(extraction.to_json()), "flags": sorted(flags)}, sort_keys=True),
+                json.dumps(email, sort_keys=True),
                 processed_at,
             ),
         )
-        created_deal = False
-        if extraction.create_deal:
+        result["stored_reply"] = True
+        if extraction.create_deal and not skip_deal_creation:
             price_options: list[PriceOption | None] = extraction.price_options or [None]
             for price_option in price_options:
                 root_domain = price_option.root_domain if price_option else context["root_domain"]
@@ -157,6 +221,7 @@ def save_reply_and_maybe_deal(campaign_id: str, email: dict[str, Any], lead: dic
                         """,
                         (*values, price_amount, price_currency, extraction.link_insertion_cost_amount, extraction.link_insertion_cost_currency, extraction.link_insertion_notes, processed_at, existing["id"]),
                     )
+                    result["deal_updated"] += 1
                 else:
                     connection.execute(
                         """
@@ -206,33 +271,96 @@ def save_reply_and_maybe_deal(campaign_id: str, email: dict[str, Any], lead: dic
                             extraction.link_insertion_notes,
                             "AUD",
                             "AUD",
-                            "Ask",
+                            price_band_for(price_amount),
                             "basic",
                             0,
                             "needs_review",
                             processed_at,
                         ),
                     )
-                    created_deal = True
+                    result["deal_created"] += 1
+                if root_domain:
+                    result["domains_changed"].append(root_domain)
             assign_missing_publisher_entities(connection)
         connection.commit()
-    return created_deal
+    result["domains_changed"] = sorted(set(result["domains_changed"]))
+    return result
+
+
+def scoped_campaign_ids(campaign_ids: list[str] | None = None) -> tuple[list[str], list[dict[str, Any]]]:
+    configured = list(dict.fromkeys(campaign_ids or DEFAULT_CAMPAIGN_IDS))
+    campaigns = list_campaigns()
+    matching = matching_guest_post_campaigns(campaigns)
+    discovered_ids = [str(item.get("id") or "") for item in matching if item.get("id")]
+    merged = list(dict.fromkeys([*configured, *discovered_ids]))
+    campaign_map = {str(item.get("id") or ""): item for item in campaigns if item.get("id")}
+    return merged, [campaign_map[campaign_id] for campaign_id in merged if campaign_id in campaign_map]
 
 
 def sync_replies(campaign_ids: list[str] | None = None) -> dict[str, Any]:
-    campaign_ids = campaign_ids or DEFAULT_CAMPAIGN_IDS
-    summary = {"campaigns": {}, "inbound_replies": 0, "new_or_updated_deals": 0}
-    for campaign_id in campaign_ids:
-        leads = list_campaign_leads(campaign_id)
-        replies = inbound_replies(campaign_id)
-        created = 0
+    scoped_ids, campaign_rows = scoped_campaign_ids(campaign_ids)
+    campaign_names = {str(row.get("id") or ""): str(row.get("name") or "") for row in campaign_rows}
+    summary = {
+        "campaigns": {},
+        "campaigns_checked": len(scoped_ids),
+        "campaign_names": campaign_names,
+        "inbound_replies": 0,
+        "new_replies_found": 0,
+        "new_or_updated_deals": 0,
+        "deals_created": 0,
+        "deals_updated": 0,
+        "ignored_acknowledgement_replies": 0,
+        "manual_review_items": 0,
+        "attachment_unclear_items": 0,
+        "duplicate_replies_skipped": 0,
+        "errors": [],
+        "domains_added_or_changed": [],
+    }
+    for campaign_id in scoped_ids:
+        try:
+            replies = inbound_replies(campaign_id)
+            leads = list_campaign_leads(campaign_id) if replies else {}
+        except Exception as exc:
+            summary["errors"].append({"campaign_id": campaign_id, "error": str(exc)})
+            continue
+        campaign_summary = {
+            "name": campaign_names.get(campaign_id, ""),
+            "inbound_replies": len(replies),
+            "new_replies_found": 0,
+            "deals_created": 0,
+            "deals_updated": 0,
+            "ignored_acknowledgements": 0,
+            "manual_review_items": 0,
+            "attachment_unclear_items": 0,
+            "duplicate_replies_skipped": 0,
+            "domains_added_or_changed": [],
+        }
         for reply in replies:
             lead_email = str(reply.get("lead") or "").lower()
-            if save_reply_and_maybe_deal(campaign_id, reply, leads.get(lead_email)):
-                created += 1
-        summary["campaigns"][campaign_id] = {"inbound_replies": len(replies), "new_deals": created}
+            outcome = save_reply_and_maybe_deal(campaign_id, reply, leads.get(lead_email))
+            if outcome["duplicate_reply"]:
+                campaign_summary["duplicate_replies_skipped"] += 1
+                summary["duplicate_replies_skipped"] += 1
+                continue
+            campaign_summary["new_replies_found"] += 1
+            campaign_summary["deals_created"] += int(outcome["deal_created"])
+            campaign_summary["deals_updated"] += int(outcome["deal_updated"])
+            campaign_summary["ignored_acknowledgements"] += 1 if outcome["ignored_acknowledgement"] else 0
+            campaign_summary["manual_review_items"] += 1 if outcome["manual_review"] else 0
+            campaign_summary["attachment_unclear_items"] += 1 if outcome["attachment_or_unclear"] else 0
+            campaign_summary["domains_added_or_changed"].extend(outcome["domains_changed"])
+            summary["new_replies_found"] += 1
+            summary["deals_created"] += int(outcome["deal_created"])
+            summary["deals_updated"] += int(outcome["deal_updated"])
+            summary["ignored_acknowledgement_replies"] += 1 if outcome["ignored_acknowledgement"] else 0
+            summary["manual_review_items"] += 1 if outcome["manual_review"] else 0
+            summary["attachment_unclear_items"] += 1 if outcome["attachment_or_unclear"] else 0
+            summary["domains_added_or_changed"].extend(outcome["domains_changed"])
+        campaign_summary["domains_added_or_changed"] = sorted(set(campaign_summary["domains_added_or_changed"]))
+        summary["campaigns"][campaign_id] = campaign_summary
         summary["inbound_replies"] += len(replies)
-        summary["new_or_updated_deals"] += created
+    summary["new_or_updated_deals"] = summary["deals_created"] + summary["deals_updated"]
+    summary["domains_added_or_changed"] = sorted(set(summary["domains_added_or_changed"]))
     return summary
 
 
@@ -620,6 +748,69 @@ def list_sync_runs(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def list_catalogue_deals(user: dict[str, Any], filters: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    from .platform_runtime import platform_configured
+
+    if platform_configured():
+        from sqlalchemy import select
+
+        from .platform.enums import ListingStatus, OfferStatus
+        from .platform.models import CatalogueListing, Domain, Offer
+        from .platform_runtime import platform_session
+
+        filters = filters or {}
+        tier_rank = {"basic": 1, "trusted": 2, "full": 3}.get(str(user.get("visibility_tier") or "basic"), 1)
+        with platform_session() as session:
+            rows = list(
+                session.execute(
+                    select(CatalogueListing, Offer, Domain)
+                    .join(Offer, Offer.id == CatalogueListing.offer_id)
+                    .join(Domain, Domain.id == CatalogueListing.domain_id)
+                    .where(
+                        CatalogueListing.status == ListingStatus.LISTED,
+                        Offer.status == OfferStatus.APPROVED,
+                    )
+                    .order_by(CatalogueListing.agency_price_aud, Domain.normalized_domain)
+                )
+            )
+            result: list[dict[str, Any]] = []
+            for listing, offer, domain in rows:
+                required = {"basic": 1, "trusted": 2, "full": 3}.get(listing.visibility_tier, 1)
+                if required > tier_rank:
+                    continue
+                terms = dict(listing.public_terms or {})
+                q = str(filters.get("q") or "").lower()
+                haystack = " ".join(
+                    [domain.normalized_domain, listing.title or "", str(terms.get("industry") or ""), domain.tld]
+                ).lower()
+                if q and q not in haystack:
+                    continue
+                if filters.get("industry") and str(filters["industry"]).lower() not in str(terms.get("industry") or "").lower():
+                    continue
+                if filters.get("tld") and str(filters["tld"]).lower().lstrip(".") != domain.tld.lower().lstrip("."):
+                    continue
+                result.append(
+                    {
+                        "id": listing.id,
+                        "root_domain": domain.normalized_domain,
+                        "site_name": listing.title or domain.normalized_domain,
+                        "industry": terms.get("industry") or "",
+                        "tld": domain.tld,
+                        "domain_trust": terms.get("domain_trust") or "",
+                        "quality_notes": terms.get("quality_notes") or "",
+                        "reseller_price_amount": float(listing.agency_price_aud),
+                        "reseller_price_currency": "AUD",
+                        "placement_type": offer.placement_type or "other",
+                        "price_band": price_band_for(float(listing.agency_price_aud)),
+                        "visibility_min_tier": listing.visibility_tier,
+                        "is_listed": 1,
+                        "admin_review_status": "approved",
+                        "writing_requirements": terms.get("writing_requirements") or "",
+                        "link_requirements": terms.get("link_requirements") or "",
+                        "turnaround_time": terms.get("turnaround_time") or "",
+                        "link_insertion_notes": terms.get("link_insertion_notes") or "",
+                    }
+                )
+            return result
     init_db()
     filters = filters or {}
     tier_rank = {"basic": 1, "trusted": 2, "full": 3}.get(str(user.get("visibility_tier") or "basic"), 1)
@@ -641,7 +832,14 @@ def list_catalogue_deals(user: dict[str, Any], filters: dict[str, str] | None = 
     return [dict(row) for row in rows]
 
 
-def get_catalogue_deal(deal_id: int, user: dict[str, Any]) -> dict[str, Any]:
+def get_catalogue_deal(deal_id: int | str, user: dict[str, Any]) -> dict[str, Any]:
+    from .platform_runtime import platform_configured
+
+    if platform_configured():
+        return next(
+            (row for row in list_catalogue_deals(user) if str(row.get("id")) == str(deal_id)),
+            {},
+        )
     deal = get_deal(deal_id)
     if not deal:
         return {}
@@ -652,7 +850,25 @@ def get_catalogue_deal(deal_id: int, user: dict[str, Any]) -> dict[str, Any]:
     return deal if tier_rank >= required_rank else {}
 
 
-def create_agency_enquiry(user_id: int, deal_id: int, message: str) -> int:
+def create_agency_enquiry(user_id: int, deal_id: int | str, message: str) -> int:
+    from .platform_runtime import platform_configured
+
+    if platform_configured():
+        from .platform.models import AgencyEnquiry, CatalogueListing
+        from .platform_runtime import platform_session
+
+        with platform_session() as session:
+            if session.get(CatalogueListing, str(deal_id)) is None:
+                raise LookupError("catalogue listing not found")
+            enquiry = AgencyEnquiry(
+                user_id=user_id,
+                listing_id=str(deal_id),
+                message=message.strip(),
+                status="new",
+            )
+            session.add(enquiry)
+            session.flush()
+            return int(enquiry.id)
     init_db()
     with connect() as connection:
         cursor = connection.execute(
@@ -664,6 +880,37 @@ def create_agency_enquiry(user_id: int, deal_id: int, message: str) -> int:
 
 
 def list_agency_enquiries(limit: int = 50) -> list[dict[str, Any]]:
+    from .platform_runtime import platform_configured
+
+    if platform_configured():
+        from sqlalchemy import select
+
+        from .platform.models import AgencyEnquiry, CatalogueListing, Domain, UserAccount
+        from .platform_runtime import platform_session
+
+        with platform_session() as session:
+            rows = session.execute(
+                select(AgencyEnquiry, UserAccount, CatalogueListing, Domain)
+                .join(UserAccount, UserAccount.id == AgencyEnquiry.user_id)
+                .join(CatalogueListing, CatalogueListing.id == AgencyEnquiry.listing_id)
+                .join(Domain, Domain.id == CatalogueListing.domain_id)
+                .order_by(AgencyEnquiry.created_at.desc())
+                .limit(limit)
+            )
+            return [
+                {
+                    "id": enquiry.id,
+                    "user_id": user.id,
+                    "deal_id": listing.id,
+                    "message": enquiry.message,
+                    "created_at": enquiry.created_at.isoformat(),
+                    "status": enquiry.status,
+                    "agency_email": user.email,
+                    "root_domain": domain.normalized_domain,
+                    "site_name": listing.title or domain.normalized_domain,
+                }
+                for enquiry, user, listing, domain in rows
+            ]
     init_db()
     with connect() as connection:
         rows = connection.execute(

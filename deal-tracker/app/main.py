@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.api_v1 import router as api_v1_router
 
 from deal_tracker.auth import (
     SESSION_COOKIE,
@@ -40,11 +45,48 @@ from deal_tracker.deals import (
     update_publisher_entity,
 )
 from deal_tracker.fx import aud_estimate_label, convert_from_aud, rates_to_aud
+from deal_tracker.intake import create_import, import_detail, intake_dashboard, rows_from_csv, rows_from_paste
+from deal_tracker.prospecting_bridge import prospecting_stats, run_limited_crawl
 from deal_tracker.sync_state import run_sync_recorded, sync_due, sync_interval_days
+from deal_tracker.platform_runtime import platform_configured
 
 
-app = FastAPI(title="Guest Post Deal Tracker")
+app = FastAPI(title="Link OS")
+app.include_router(api_v1_router)
 _sync_lock = asyncio.Lock()
+WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
+if (WEB_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="ops-assets")
+
+
+@app.middleware("http")
+async def canonical_console_redirect(request: Request, call_next):
+    if platform_configured() and request.url.path.startswith("/admin"):
+        return RedirectResponse("/ops", status_code=303)
+    return await call_next(request)
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> JSONResponse:
+    return JSONResponse({"ok": True, "database_configured": platform_configured()})
+
+
+def _ops_index() -> FileResponse | HTMLResponse:
+    index = WEB_DIST / "index.html"
+    if not index.is_file():
+        return HTMLResponse("LINK OS console has not been compiled", status_code=503)
+    return FileResponse(index)
+
+
+@app.get("/ops", include_in_schema=False)
+@app.get("/ops/{path:path}", include_in_schema=False)
+def operations_console(request: Request, path: str = ""):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user.get("role") != "admin":
+        return RedirectResponse("/catalogue", status_code=303)
+    return _ops_index()
 
 
 def money(amount: object, currency: object = "AUD") -> str:
@@ -136,7 +178,7 @@ def page(title: str, body: str, user: dict | None = None) -> HTMLResponse:
     nav = ""
     if user:
         nav = (
-            '<a href="/admin">Admin</a><a href="/admin/scorecard">Scorecard</a><a href="/admin/deals">Deals</a><a href="/admin/agencies">Agencies</a><a href="/admin/sync">Sync</a>'
+            '<a href="/admin">Overview</a><a href="/admin/intake">Prospecting</a><a href="/admin/deals">Inventory</a><a href="/admin/scorecard">Scorecard</a><a href="/admin/agencies">Agencies</a><a href="/admin/sync">Reply sync</a>'
             if role == "admin"
             else '<a href="/catalogue">Catalogue</a>'
         )
@@ -151,42 +193,66 @@ def page(title: str, body: str, user: dict | None = None) -> HTMLResponse:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html_escape(title)}</title>
   <style>
-    :root {{ color-scheme: light; font-family: "Geist", "Satoshi", "Segoe UI", system-ui, sans-serif; }}
-    body {{ margin: 0; background: #f7f8fa; color: #202124; }}
-    a {{ color: #285d5f; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    header {{ background: #fbfbfc; border-bottom: 1px solid #d8dde3; padding: 16px 22px; display: flex; align-items: center; justify-content: space-between; gap: 16px; position: sticky; top: 0; }}
-    main {{ max-width: 1380px; margin: 0 auto; padding: 24px; }}
-    h1 {{ margin: 0 0 8px; font-size: 28px; letter-spacing: 0; line-height: 1.1; }}
-    h2 {{ margin: 0 0 12px; font-size: 18px; }}
-    table {{ width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d8dde3; }}
-    th, td {{ padding: 10px 12px; border-bottom: 1px solid #e7eaee; text-align: left; vertical-align: top; font-size: 14px; }}
-    th {{ background: #edf1f3; font-size: 12px; text-transform: uppercase; color: #53606f; }}
-    input, select, textarea {{ width: 100%; box-sizing: border-box; border: 1px solid #c8ced6; border-radius: 6px; padding: 8px 10px; font: inherit; background: #fff; }}
-    textarea {{ min-height: 94px; }}
-    button, .button {{ border: 0; border-radius: 6px; padding: 9px 13px; background: #223234; color: #fff; font-weight: 650; cursor: pointer; display: inline-block; }}
-    button:active, .button:active {{ transform: translateY(1px); }}
-    .brand {{ font-weight: 760; letter-spacing: 0; }}
-    .nav {{ display: flex; gap: 14px; align-items: center; font-size: 14px; }}
-    .panel {{ background: #fff; border: 1px solid #d8dde3; border-radius: 8px; padding: 16px; margin-bottom: 18px; }}
-    .muted {{ color: #667085; }}
+    :root {{ color-scheme: light; font-family: "Geist", "Satoshi", "Avenir Next", system-ui, sans-serif; --ink:#17201f; --muted:#65706e; --line:#dce2df; --paper:#ffffff; --wash:#f3f5f2; --accent:#326b5c; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: var(--wash); color: var(--ink); min-height: 100dvh; }}
+    a {{ color: #285d50; text-decoration: none; }}
+    a:hover {{ color: #173e34; }}
+    header {{ background: rgba(250,251,249,.94); border-bottom: 1px solid var(--line); padding: 14px max(22px, calc((100vw - 1380px)/2)); display: flex; align-items: center; justify-content: space-between; gap: 24px; position: sticky; top: 0; z-index: 2; backdrop-filter: blur(14px); }}
+    main {{ max-width: 1380px; margin: 0 auto; padding: 30px 24px 64px; }}
+    h1 {{ margin: 0 0 8px; font-size: clamp(28px, 4vw, 46px); letter-spacing: -0.045em; line-height: 1; font-weight: 760; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; letter-spacing: -.015em; }}
+    h3 {{ margin: 0 0 8px; font-size: 15px; }}
+    p {{ line-height: 1.55; }}
+    table {{ width: 100%; border-collapse: collapse; background: var(--paper); border: 1px solid var(--line); }}
+    th, td {{ padding: 11px 13px; border-bottom: 1px solid #e8ece9; text-align: left; vertical-align: top; font-size: 14px; }}
+    th {{ background: #f5f7f5; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #5a6864; }}
+    input, select, textarea {{ width: 100%; border: 1px solid #cbd3cf; border-radius: 9px; padding: 10px 12px; font: inherit; background: #fff; color: var(--ink); transition: border-color .2s ease, box-shadow .2s ease; }}
+    input:focus, select:focus, textarea:focus {{ outline: none; border-color: #5e887c; box-shadow: 0 0 0 3px rgba(50,107,92,.11); }}
+    textarea {{ min-height: 118px; resize: vertical; }}
+    button, .button {{ border: 1px solid #234f43; border-radius: 9px; padding: 10px 14px; background: #285d50; color: #fff; font-weight: 680; cursor: pointer; display: inline-block; transition: transform .2s cubic-bezier(.16,1,.3,1), background .2s ease; }}
+    button:hover, .button:hover {{ background: #1f4d41; color: #fff; }}
+    button:active, .button:active {{ transform: translateY(1px) scale(.985); }}
+    button.secondary, .button.secondary {{ background: #fff; color: #285d50; border-color: #b9c8c2; }}
+    .brand {{ font-weight: 800; letter-spacing: -.03em; white-space: nowrap; }}
+    .brand span {{ color: var(--accent); }}
+    .nav {{ display: flex; gap: 4px; align-items: center; font-size: 13px; flex-wrap: wrap; }}
+    .nav a {{ padding: 7px 9px; border-radius: 7px; color: #45514e; }}
+    .nav a:hover {{ background: #e9eeeb; color: #1f4037; }}
+    .panel {{ background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 18px; box-shadow: 0 18px 40px -34px rgba(29,52,45,.4); }}
+    .muted {{ color: var(--muted); }}
+    .eyebrow {{ color: var(--accent); text-transform: uppercase; letter-spacing: .12em; font-size: 11px; font-weight: 760; margin-bottom: 12px; }}
+    .page-lead {{ max-width: 68ch; color: var(--muted); margin: 0; }}
+    .hero {{ display:grid; grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr); gap:42px; align-items:end; margin: 8px 0 28px; }}
     .grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
     .metrics {{ display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr; gap: 12px; margin: 18px 0; }}
-    .metric {{ background: #fff; border-top: 3px solid #789397; padding: 14px; }}
-    .metric strong {{ display: block; font-size: 24px; font-family: "Geist Mono", ui-monospace, SFMono-Regular, monospace; }}
+    .metric {{ background: #fff; border-top: 2px solid #78978e; padding: 15px; }}
+    .metric strong {{ display: block; font-size: 25px; letter-spacing:-.04em; font-family: "Geist Mono", "SFMono-Regular", ui-monospace, monospace; }}
     .filters {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr auto; gap: 10px; align-items: end; }}
     .pill {{ display: inline-block; border-radius: 999px; background: #e9f0ef; color: #2b5153; padding: 3px 8px; font-size: 12px; }}
     .danger {{ background: #f7e7e5; color: #883d35; }}
     .success {{ background: #e5f0e9; color: #315c42; }}
     .evidence {{ white-space: pre-wrap; background: #202124; color: #f7f8fa; border-radius: 8px; padding: 14px; overflow: auto; }}
     .split {{ display: grid; grid-template-columns: 1.8fr 1fr; gap: 16px; align-items: start; }}
+    .intake-grid {{ display:grid; grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr); gap:18px; align-items:start; }}
+    .dropzone {{ display:block; border:1px dashed #94aaa3; border-radius:12px; padding:24px; background:#f8faf8; text-align:center; cursor:pointer; transition:background .2s ease,border-color .2s ease,transform .2s ease; }}
+    .dropzone:hover, .dropzone.dragging {{ background:#edf4f0; border-color:#477769; transform:translateY(-1px); }}
+    .dropzone input {{ position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }}
+    .file-name {{ display:block; margin-top:8px; font-family:"Geist Mono","SFMono-Regular",monospace; font-size:12px; color:#53635e; }}
+    .workflow {{ display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:0; border:1px solid var(--line); background:#fff; border-radius:14px; overflow:hidden; margin:18px 0 26px; }}
+    .workflow div {{ padding:14px; border-right:1px solid var(--line); min-height:92px; }}
+    .workflow div:last-child {{ border-right:0; }}
+    .workflow span {{ display:block; color:#71807b; font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin-bottom:10px; }}
+    .workflow strong {{ font-family:"Geist Mono","SFMono-Regular",monospace; font-size:22px; }}
+    .status-line {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+    .form-actions {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }}
     .catalogue {{ display: grid; grid-template-columns: 1.7fr 1fr 1fr 1fr 1fr auto; gap: 0; }}
     .notice {{ border-left: 4px solid #789397; background: #eef4f3; padding: 12px 14px; margin-bottom: 16px; }}
-    @media (max-width: 900px) {{ main {{ padding: 16px; }} .grid, .metrics, .filters, .split {{ grid-template-columns: 1fr; }} table {{ display: block; overflow-x: auto; }} header {{ align-items: flex-start; flex-direction: column; }} }}
+    @media (max-width: 900px) {{ main {{ padding: 22px 16px 48px; }} .grid, .metrics, .filters, .split, .hero, .intake-grid, .workflow {{ grid-template-columns: 1fr; }} .workflow div {{ border-right:0; border-bottom:1px solid var(--line); min-height:auto; }} table {{ display: block; overflow-x: auto; }} header {{ align-items: flex-start; flex-direction: column; padding:14px 16px; }} }}
   </style>
 </head>
 <body>
-  <header><div class="brand">Guest Post Deal Tracker</div><nav class="nav">{nav}</nav></header>
+  <header><div class="brand">LINK <span>OS</span></div><nav class="nav">{nav}</nav></header>
   <main>{body}</main>
 </body>
 </html>"""
@@ -232,8 +298,11 @@ async def sync_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    init_db()
     ensure_bootstrap_admin()
+    if platform_configured():
+        # The durable PostgreSQL worker owns all polling and reply writes.
+        return
+    init_db()
     if sync_due():
         asyncio.create_task(maybe_run_background_sync("startup"))
     asyncio.create_task(sync_loop())
@@ -244,7 +313,7 @@ def home(request: Request) -> RedirectResponse:
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    return RedirectResponse("/admin" if user.get("role") == "admin" else "/catalogue", status_code=303)
+    return RedirectResponse("/ops" if user.get("role") == "admin" else "/catalogue", status_code=303)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -272,7 +341,7 @@ async def login_action(request: Request) -> RedirectResponse:
     user = authenticate(form.get("email", ""), form.get("password", ""))
     if not user:
         return RedirectResponse("/login?error=1", status_code=303)
-    response = RedirectResponse("/admin" if user.get("role") == "admin" else "/catalogue", status_code=303)
+    response = RedirectResponse("/ops" if user.get("role") == "admin" else "/catalogue", status_code=303)
     response.set_cookie(SESSION_COOKIE, create_session(int(user["id"])), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 14)
     return response
 
@@ -306,6 +375,8 @@ def admin_dashboard(request: Request):
     if isinstance(user, RedirectResponse):
         return user
     stats = dashboard_stats()
+    intake = intake_dashboard(8)
+    discovery = prospecting_stats()
     sync_runs = list_sync_runs(5)
     enquiries = list_agency_enquiries(8)
     sync_rows = "".join(
@@ -318,18 +389,28 @@ def admin_dashboard(request: Request):
     )
     return page(
         "Admin",
-        f"""<h1>Admin dashboard</h1>
-<p class="muted">Private operating view for reply sync, review, pricing, and agency catalogue control.</p>
+        f"""<section class="hero">
+  <div><div class="eyebrow">Link building control room</div><h1>One pipeline, from raw domains to live inventory.</h1><p class="page-lead">Import prospects, run contact discovery, collect publisher terms, review pricing and publish approved placements without moving between repositories.</p></div>
+  <div class="status-line"><a class="button" href="/admin/intake">Add prospects</a><a class="button secondary" href="/admin/sync">Sync replies</a></div>
+</section>
+<section class="workflow">
+  <div><span>Imported</span><strong>{intake['totals']['prospects']}</strong></div>
+  <div><span>Queued</span><strong>{discovery['pending_urls']}</strong></div>
+  <div><span>Scraped</span><strong>{discovery['scraped_urls']}</strong></div>
+  <div><span>Emails</span><strong>{discovery['emails_found']}</strong></div>
+  <div><span>Deals</span><strong>{stats['total_deals']}</strong></div>
+  <div><span>Listed</span><strong>{stats['listed']}</strong></div>
+</section>
 <section class="metrics">
-  <div class="metric"><span class="muted">Deals</span><strong>{stats['total_deals']}</strong></div>
+  <div class="metric"><span class="muted">Candidate domains</span><strong>{discovery['candidate_domains']}</strong></div>
   <div class="metric"><span class="muted">Needs review</span><strong>{stats['needs_review']}</strong></div>
-  <div class="metric"><span class="muted">Listed</span><strong>{stats['listed']}</strong></div>
   <div class="metric"><span class="muted">Unpriced</span><strong>{stats['missing_reseller_price']}</strong></div>
   <div class="metric"><span class="muted">Missing DT</span><strong>{stats['missing_domain_trust']}</strong></div>
+  <div class="metric"><span class="muted">Import batches</span><strong>{intake['totals']['imports']}</strong></div>
 </section>
 <div class="split">
   <section class="panel">
-    <h2>Recent syncs</h2>
+    <h2>Recent reply syncs</h2>
     <p class="muted">Automatic Instantly sync checks every {sync_interval_days()} days while the app is running.</p>
     <p><a class="button" href="/admin/sync">Open sync controls</a></p>
     <table><thead><tr><th>Started</th><th>Trigger</th><th>Status</th><th>Replies</th><th>New deals</th><th>Error</th></tr></thead><tbody>{sync_rows or '<tr><td colspan="6" class="muted">No sync runs recorded yet.</td></tr>'}</tbody></table>
@@ -341,6 +422,140 @@ def admin_dashboard(request: Request):
 </div>""",
         user,
     )
+
+
+def intake_rows_table(rows: list[dict]) -> str:
+    body = "".join(
+        f"<tr><td>{html_escape(row.get('input_value'))}</td><td>{html_escape(row.get('root_domain'))}</td><td><span class='pill'>{html_escape(row.get('row_status') or row.get('status'))}</span></td><td>{html_escape(row.get('reason'))}</td></tr>"
+        for row in rows
+    )
+    return f"<table><thead><tr><th>Input</th><th>Domain</th><th>Status</th><th>Detail</th></tr></thead><tbody>{body or '<tr><td colspan=\"4\" class=\"muted\">No rows in this import.</td></tr>'}</tbody></table>"
+
+
+@app.get("/admin/intake", response_class=HTMLResponse)
+def admin_intake(request: Request, imported: int = 0, crawl: str = "", error: str = ""):
+    user = require_admin(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    data = intake_dashboard()
+    discovery = prospecting_stats()
+    notice = ""
+    if imported:
+        detail = import_detail(imported)
+        batch = detail.get("import") or {}
+        notice = (
+            f'<div class="notice success"><strong>Import #{imported} complete.</strong> '
+            f"{int(batch.get('accepted_rows') or 0)} added, {int(batch.get('duplicate_rows') or 0)} duplicates, "
+            f"{int(batch.get('rejected_rows') or 0)} rejected and {int(batch.get('queued_rows') or 0)} queued. "
+            f'<a href="/admin/intake/{imported}">Review rows</a>.</div>'
+        )
+    if crawl == "ok":
+        notice = '<div class="notice success"><strong>Discovery pass complete.</strong> The next queued URLs were crawled and scored.</div>'
+    elif crawl == "error":
+        notice = '<div class="notice danger"><strong>Discovery could not run.</strong> Check that the prospecting package and data directory are available.</div>'
+    if error == "file_too_large":
+        notice = '<div class="notice danger"><strong>File not imported.</strong> CSV uploads are limited to 5 MB so a mistaken export cannot lock the dashboard.</div>'
+    elif error == "no_rows":
+        notice = '<div class="notice danger"><strong>No usable domains found.</strong> Paste domains directly or use a CSV column such as domain, website, URL, referring_domain or source_domain.</div>'
+    import_rows = "".join(
+        f"<tr><td><a href='/admin/intake/{row['id']}'>#{row['id']}</a></td><td>{html_escape(row.get('source_name') or row.get('source_type'))}</td><td>{row.get('total_rows')}</td><td>{row.get('accepted_rows')}</td><td>{row.get('duplicate_rows')}</td><td>{row.get('rejected_rows')}</td><td>{row.get('queued_rows')}</td><td>{html_escape(str(row.get('created_at') or '')[:19])}</td></tr>"
+        for row in data["imports"]
+    )
+    prospect_rows = "".join(
+        f"<tr><td>{html_escape(row.get('root_domain'))}</td><td>{html_escape(row.get('contact_email')) or '<span class=\"muted\">Not found yet</span>'}</td><td>{html_escape(row.get('niche'))}</td><td><span class='pill'>{html_escape(row.get('lifecycle_stage'))}</span></td><td>{html_escape(row.get('source_name'))}</td></tr>"
+        for row in data["prospects"]
+    )
+    return page(
+        "Prospecting intake",
+        f"""{notice}<section class="hero"><div><div class="eyebrow">Prospecting intake</div><h1>Drop a file or paste a list.</h1><p class="page-lead">Link OS recognises common CSV columns such as domain, website, URL, referring domain, contact email, niche and opportunity type. Duplicate and malformed rows are kept in the audit trail without being re-queued.</p></div><div class="status-line"><span class="pill">{discovery['pending_urls']} URLs waiting</span><span class="pill">{discovery['emails_found']} emails found</span></div></section>
+<div class="intake-grid">
+  <form class="panel" method="post" action="/admin/intake" enctype="multipart/form-data" id="intake-form">
+    <h2>Import prospects</h2>
+    <p><label class="dropzone" id="dropzone"><strong>Choose or drop a CSV</strong><span class="file-name" id="file-name">CSV, TSV and semicolon-separated exports are supported</span><input id="csv-file" name="csv_file" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"></label></p>
+    <p><label>Or paste domains, URLs or emails<br><textarea name="pasted_items" placeholder="publisher.com.au&#10;https://anotherpublisher.com.au/advertise&#10;editor@thirdpublisher.com.au"></textarea></label></p>
+    <div class="grid"><label>Source label<br><input name="source_name" value="manual_dashboard" required></label><label>After import<br><select name="mode"><option value="queue">Queue accepted domains for discovery</option><option value="import">Import only</option></select></label></div>
+    <div class="form-actions"><button type="submit" id="import-button">Import prospects</button></div>
+    <p class="muted">Imports only write to local Link OS databases. Outreach is never launched automatically.</p>
+  </form>
+  <section class="panel">
+    <h2>Discovery queue</h2>
+    <p class="muted">Run a bounded crawl across the next queued pages. This collects placement evidence and public contact emails.</p>
+    <section class="metrics" style="grid-template-columns:1fr 1fr;margin:14px 0"><div class="metric"><span class="muted">Pending URLs</span><strong>{discovery['pending_urls']}</strong></div><div class="metric"><span class="muted">Candidate domains</span><strong>{discovery['candidate_domains']}</strong></div></section>
+    <form method="post" action="/admin/prospecting/crawl"><div class="grid"><label>URL limit<br><input type="number" name="limit" min="1" max="100" value="25"></label><label>Workers<br><input type="number" name="workers" min="1" max="8" value="4"></label></div><div class="form-actions"><button type="submit">Run discovery pass</button></div></form>
+  </section>
+</div>
+<section class="panel"><h2>Recent imports</h2><table><thead><tr><th>Batch</th><th>Source</th><th>Rows</th><th>Added</th><th>Duplicates</th><th>Rejected</th><th>Queued</th><th>Created</th></tr></thead><tbody>{import_rows or '<tr><td colspan="8" class="muted">No imports yet. Drop a CSV or paste domains above.</td></tr>'}</tbody></table></section>
+<section class="panel"><h2>Latest prospects</h2><table><thead><tr><th>Domain</th><th>Contact</th><th>Niche</th><th>Stage</th><th>Source</th></tr></thead><tbody>{prospect_rows or '<tr><td colspan="5" class="muted">No prospects yet.</td></tr>'}</tbody></table></section>
+<script>
+const input=document.getElementById('csv-file'), drop=document.getElementById('dropzone'), name=document.getElementById('file-name'), form=document.getElementById('intake-form'), button=document.getElementById('import-button');
+input.addEventListener('change',()=>{{if(input.files[0]) name.textContent=input.files[0].name;}});
+['dragenter','dragover'].forEach(event=>drop.addEventListener(event,e=>{{e.preventDefault();drop.classList.add('dragging');}}));
+['dragleave','drop'].forEach(event=>drop.addEventListener(event,e=>{{e.preventDefault();drop.classList.remove('dragging');}}));
+drop.addEventListener('drop',e=>{{if(e.dataTransfer.files.length){{input.files=e.dataTransfer.files;name.textContent=input.files[0].name;}}}});
+form.addEventListener('submit',()=>{{button.disabled=true;button.textContent='Importing…';}});
+</script>""",
+        user,
+    )
+
+
+@app.post("/admin/intake")
+async def admin_intake_submit(request: Request) -> RedirectResponse:
+    user = require_admin(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    form = await request.form()
+    pasted = str(form.get("pasted_items") or "")
+    source_name = str(form.get("source_name") or "manual_dashboard").strip()[:120]
+    mode = str(form.get("mode") or "queue")
+    upload = form.get("csv_file")
+    rows = rows_from_paste(pasted)
+    source_type = "paste"
+    filename = ""
+    if upload is not None and getattr(upload, "filename", ""):
+        filename = str(getattr(upload, "filename", ""))[:180]
+        content = await upload.read(5_000_001)
+        if len(content) > 5_000_000:
+            return RedirectResponse("/admin/intake?error=file_too_large", status_code=303)
+        rows.extend(rows_from_csv(content))
+        source_type = "csv_and_paste" if pasted.strip() else "csv"
+    if not rows:
+        return RedirectResponse("/admin/intake?error=no_rows", status_code=303)
+    result = create_import(rows, source_type=source_type, source_name=filename or source_name, queue=mode == "queue")
+    return RedirectResponse(f"/admin/intake?imported={result['import_id']}", status_code=303)
+
+
+@app.get("/admin/intake/{import_id}", response_class=HTMLResponse)
+def admin_intake_detail(request: Request, import_id: int):
+    user = require_admin(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    detail = import_detail(import_id)
+    batch = detail.get("import") or {}
+    if not batch:
+        return page("Import not found", '<section class="panel"><h1>Import not found</h1></section>', user)
+    return page(
+        f"Import #{import_id}",
+        f"""<section class="hero"><div><div class="eyebrow">Import audit</div><h1>Batch #{import_id}</h1><p class="page-lead">{html_escape(batch.get('source_name'))} · {html_escape(batch.get('created_at'))}</p></div><div><a class="button secondary" href="/admin/intake">Back to intake</a></div></section>
+<section class="metrics"><div class="metric"><span class="muted">Rows</span><strong>{batch.get('total_rows')}</strong></div><div class="metric"><span class="muted">Added</span><strong>{batch.get('accepted_rows')}</strong></div><div class="metric"><span class="muted">Duplicates</span><strong>{batch.get('duplicate_rows')}</strong></div><div class="metric"><span class="muted">Rejected</span><strong>{batch.get('rejected_rows')}</strong></div><div class="metric"><span class="muted">Queued</span><strong>{batch.get('queued_rows')}</strong></div></section>
+<section class="panel">{intake_rows_table(detail['rows'])}</section>""",
+        user,
+    )
+
+
+@app.post("/admin/prospecting/crawl")
+async def admin_prospecting_crawl(request: Request) -> RedirectResponse:
+    user = require_admin(request)
+    if isinstance(user, RedirectResponse):
+        return user
+    form = await parse_form(request)
+    try:
+        limit = max(1, min(100, int(form.get("limit") or 25)))
+        workers = max(1, min(8, int(form.get("workers") or 4)))
+        await asyncio.to_thread(run_limited_crawl, limit=limit, workers=workers, timeout=8)
+        status = "ok"
+    except Exception:
+        status = "error"
+    return RedirectResponse(f"/admin/intake?crawl={status}", status_code=303)
 
 
 def count_table(rows: list[dict], label_header: str = "Bucket") -> str:
@@ -842,7 +1057,7 @@ def catalogue(request: Request, q: str = "", industry: str = "", tld: str = ""):
 
 
 @app.get("/catalogue/{deal_id}", response_class=HTMLResponse)
-def catalogue_detail(request: Request, deal_id: int, requested: str = ""):
+def catalogue_detail(request: Request, deal_id: str, requested: str = ""):
     user = require_agency_or_admin(request)
     if isinstance(user, RedirectResponse):
         return user
@@ -896,9 +1111,8 @@ async def request_info(request: Request) -> RedirectResponse:
     if isinstance(user, RedirectResponse):
         return user
     form = await parse_form(request)
-    try:
-        deal_id = int(form.get("deal_id", "0"))
-    except ValueError:
+    deal_id = str(form.get("deal_id") or "").strip()
+    if not deal_id:
         return RedirectResponse("/catalogue", status_code=303)
     if get_catalogue_deal(deal_id, user):
         create_agency_enquiry(int(user["id"]), deal_id, form.get("message", ""))

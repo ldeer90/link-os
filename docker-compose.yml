@@ -1,41 +1,83 @@
+x-link-os-environment: &link-os-environment
+  DATABASE_URL: postgresql+psycopg://link_os:${LINK_OS_DB_PASSWORD:-link-os-local-only}@postgres:5432/link_os
+  LINK_OS_MODE: ${LINK_OS_MODE:-shadow}
+  LINK_OS_API_AUTH_REQUIRED: ${LINK_OS_API_AUTH_REQUIRED:-true}
+  LINK_OS_USE_POSTGRES_AUTH: "true"
+  LINK_OS_CLI_TOKEN: ${LINK_OS_CLI_TOKEN:-}
+  LINK_OS_DATA_DIR: /app/deal-tracker/data/platform
+  INSTANTLY_API_KEY: ${INSTANTLY_API_KEY:-}
+  MONDAY_API_KEY: ${MONDAY_API_KEY:-}
+  SE_RANKING_API_KEY: ${SE_RANKING_API_KEY:-}
+  SE_RANKING_API_BASE_URL: ${SE_RANKING_API_BASE_URL:-https://api.seranking.com}
+  SE_RANKING_MONTHLY_CREDIT_CAP: ${SE_RANKING_MONTHLY_CREDIT_CAP:-10000}
+  SE_RANKING_CACHE_DAYS: ${SE_RANKING_CACHE_DAYS:-30}
+  APP_SECRET_KEY: ${APP_SECRET_KEY:-local-link-os-session-key}
+  APP_BOOTSTRAP_ADMIN_EMAIL: ${APP_BOOTSTRAP_ADMIN_EMAIL:-hello@laurencedeer.com.au}
+  APP_BOOTSTRAP_ADMIN_PASSWORD: ${APP_BOOTSTRAP_ADMIN_PASSWORD:-change-me-now}
+  SCRAPE_WORKERS: ${SCRAPE_WORKERS:-8}
+  SCRAPE_MAX_PAGES_PER_DOMAIN: ${SCRAPE_MAX_PAGES_PER_DOMAIN:-20}
+  SCRAPE_TIMEOUT_SECONDS: ${SCRAPE_TIMEOUT_SECONDS:-10}
+  SCRAPE_MAX_ATTEMPTS: ${SCRAPE_MAX_ATTEMPTS:-3}
+  SCRAPE_HOST_DELAY_SECONDS: ${SCRAPE_HOST_DELAY_SECONDS:-1}
+  IMPORT_CHUNK_SIZE: ${IMPORT_CHUNK_SIZE:-1000}
+  WORKER_IDLE_SECONDS: ${WORKER_IDLE_SECONDS:-2}
+  JOB_LEASE_MINUTES: ${JOB_LEASE_MINUTES:-20}
+
 services:
-  deal-tracker:
-    build:
-      context: ./deal-tracker
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8766
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
     environment:
-      INSTANTLY_API_KEY: ${INSTANTLY_API_KEY:-}
-      APP_SECRET_KEY: ${APP_SECRET_KEY:-change-this-to-a-long-random-string}
-      APP_BOOTSTRAP_ADMIN_EMAIL: ${APP_BOOTSTRAP_ADMIN_EMAIL:-admin@link-os.local}
-      APP_BOOTSTRAP_ADMIN_PASSWORD: ${APP_BOOTSTRAP_ADMIN_PASSWORD:-change-me-now}
-      SYNC_INTERVAL_DAYS: ${SYNC_INTERVAL_DAYS:-3}
+      POSTGRES_DB: link_os
+      POSTGRES_USER: link_os
+      POSTGRES_PASSWORD: ${LINK_OS_DB_PASSWORD:-link-os-local-only}
+    volumes:
+      - link_os_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U link_os -d link_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: link-os:local
+    build:
+      context: .
+      dockerfile: deal-tracker/Dockerfile
+    restart: unless-stopped
+    command: >-
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8766"
+    environment: *link-os-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8766:8766"
     volumes:
-      - link_os_deal_data:/app/data
-      - ./deal-tracker/generated:/app/generated
+      - link_os_platform_data:/app/deal-tracker/data/platform
+      - ./deal-tracker/generated:/app/deal-tracker/generated
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/', timeout=5).read()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
       start_period: 20s
 
-  prospecting:
+  worker:
+    image: link-os:local
     build:
-      context: ./prospecting
-    command: python -c "print('Prospecting container ready. Run a tool command with docker compose run --rm prospecting python tools/...')"
-    environment:
-      INSTANTLY_API_KEY: ${INSTANTLY_API_KEY:-}
-      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
-      APIFY_TOKEN: ${APIFY_API_TOKEN:-}
-      SE_RANKING_API_KEY: ${SE_RANKING_API_KEY:-}
-      SEMRUSH_API_KEY: ${SEMRUSH_API_KEY:-}
-      AHREFS_API_KEY: ${AHREFS_API_KEY:-}
+      context: .
+      dockerfile: deal-tracker/Dockerfile
+    restart: unless-stopped
+    command: python -m deal_tracker.worker
+    environment: *link-os-environment
+    depends_on:
+      api:
+        condition: service_healthy
     volumes:
-      - link_os_prospecting_data:/app/data
-      - ./prospecting/generated:/app/generated
+      - link_os_platform_data:/app/deal-tracker/data/platform
+      - ./deal-tracker/generated:/app/deal-tracker/generated
 
 volumes:
-  link_os_deal_data:
-  link_os_prospecting_data:
+  link_os_postgres_data:
+  link_os_platform_data:

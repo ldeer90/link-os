@@ -20,9 +20,12 @@ venv/
 **/data/**/*.db-*
 **/data/**/*.sqlite
 **/data/**/*.sqlite-*
+**/data/**/*.dump
+**/data/**/*.backup
 **/data/raw_domains/search_cache/*
 **/data/crawls/*
 **/data/contact_discovery/*
+deal-tracker/data/platform/**
 !**/data/.gitkeep
 !**/data/raw_domains/.gitkeep
 !**/data/raw_domains/search_cache/.gitkeep

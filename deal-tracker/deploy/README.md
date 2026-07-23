@@ -1,11 +1,13 @@
-# DigitalOcean Droplet Deployment
+# Legacy DigitalOcean Droplet Deployment
+
+> Recovery reference only. LINK OS now runs the root Docker Compose PostgreSQL/API/worker stack documented in `docs/OPERATIONS_RUNBOOK.md`.
 
 Recommended target: Ubuntu 24.04 LTS droplet, 1 GB RAM minimum, Sydney/Singapore region.
 
 ## One-Time Server Setup
 
 ```bash
-cd "/Users/laurencedeer/Desktop/Guest Post Deal Tracker"
+cd "/Users/laurencedeer/Projects/Codex/link-os/deal-tracker"
 bash deploy/deploy_to_droplet.sh root@DROPLET_IP
 ```
 

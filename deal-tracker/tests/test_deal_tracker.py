@@ -105,6 +105,14 @@ class DealTrackerTests(unittest.TestCase):
         self.assertEqual(reply.link_insertion_cost_currency, "USD")
         self.assertIn("link insertion", reply.link_insertion_notes.lower())
 
+    def test_media_kit_only_reply_stays_manual_review(self) -> None:
+        reply = classify_reply(
+            "Thanks Laurence. We do have a media kit for sponsored content. "
+            "Please review it here: https://docs.google.com/document/d/example and let me know."
+        )
+        self.assertEqual(reply.classification, "needs_review")
+        self.assertFalse(reply.create_deal)
+
     def test_priced_domain_lines_are_extracted_from_network_reply(self) -> None:
         reply_text = """
         Popular sites
@@ -153,11 +161,15 @@ class DealTrackerTests(unittest.TestCase):
                     "website": "https://example.com.au",
                     "payload": {"root_domain": "example.com.au", "site_name": "Example Publisher"},
                 }
-                self.assertTrue(save_reply_and_maybe_deal("campaign", email, lead))
-                self.assertFalse(save_reply_and_maybe_deal("campaign", email, lead))
+                first = save_reply_and_maybe_deal("campaign", email, lead)
+                second = save_reply_and_maybe_deal("campaign", email, lead)
                 with temp_connect() as connection:
                     deal_rows = connection.execute("select * from link_deals").fetchall()
                     reply_rows = connection.execute("select * from instantly_reply_sync").fetchall()
+                self.assertEqual(first["deal_created"], 1)
+                self.assertEqual(first["deal_updated"], 0)
+                self.assertFalse(first["duplicate_reply"])
+                self.assertTrue(second["duplicate_reply"])
                 self.assertEqual(len(deal_rows), 1)
                 self.assertEqual(len(reply_rows), 1)
                 self.assertEqual(deal_rows[0]["deal_status"], "confirmed")
@@ -202,16 +214,53 @@ class DealTrackerTests(unittest.TestCase):
                     "website": "https://thetimes.com.au",
                     "payload": {"root_domain": "thetimes.com.au", "site_name": "The Times"},
                 }
-                self.assertTrue(save_reply_and_maybe_deal("campaign", email, lead))
-                self.assertFalse(save_reply_and_maybe_deal("campaign", email, lead))
+                first = save_reply_and_maybe_deal("campaign", email, lead)
+                second = save_reply_and_maybe_deal("campaign", email, lead)
                 with temp_connect() as connection:
                     deal_rows = connection.execute("select root_domain, price_amount, price_currency, link_requirements, writing_requirements from link_deals order by root_domain").fetchall()
+                self.assertEqual(first["deal_created"], 3)
+                self.assertTrue(second["duplicate_reply"])
                 self.assertEqual(len(deal_rows), 3)
                 self.assertEqual([row["root_domain"] for row in deal_rows], ["businessdailymedia.com", "businesses.com.au", "thetimes.au"])
                 self.assertEqual(deal_rows[2]["price_amount"], 100)
                 self.assertEqual(deal_rows[2]["price_currency"], "AUD")
                 self.assertIn("business links", deal_rows[0]["link_requirements"].lower())
                 self.assertIn("420 words", deal_rows[0]["writing_requirements"].lower())
+            finally:
+                self.restore_temp_db(originals)
+
+    def test_attachment_reply_is_stored_but_not_created_as_deal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "deals.db"
+            temp_connect, _, originals = self.patch_temp_db(db_path)
+            try:
+                email = {
+                    "id": "reply-attachment",
+                    "lead": "sales@example.com.au",
+                    "thread_id": "thread-attachment",
+                    "subject": "Re: Article Submission Info Request",
+                    "from_address_email": "sales@example.com.au",
+                    "to_address_email_list": "laurence.d@ldsearch.com.au",
+                    "timestamp_email": "2026-05-25T01:00:00Z",
+                    "attachments": [{"name": "rate-card.pdf"}],
+                    "body": {"text": "Please see attached media kit for pricing and packages."},
+                }
+                lead = {
+                    "id": "lead-attachment",
+                    "email": "sales@example.com.au",
+                    "company_name": "Example Publisher",
+                    "website": "https://example.com.au",
+                    "payload": {"root_domain": "example.com.au", "site_name": "Example Publisher"},
+                }
+                result = save_reply_and_maybe_deal("campaign", email, lead)
+                with temp_connect() as connection:
+                    deal_rows = connection.execute("select * from link_deals").fetchall()
+                    reply_row = connection.execute("select raw_json from instantly_reply_sync where email_id='reply-attachment'").fetchone()
+                self.assertTrue(result["stored_reply"])
+                self.assertTrue(result["attachment_or_unclear"])
+                self.assertEqual(result["deal_created"], 0)
+                self.assertEqual(len(deal_rows), 0)
+                self.assertIn("rate-card.pdf", reply_row["raw_json"])
             finally:
                 self.restore_temp_db(originals)
 

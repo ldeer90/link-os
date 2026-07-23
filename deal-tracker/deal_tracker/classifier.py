@@ -59,6 +59,17 @@ def first_url(text: str) -> str:
     return match.group(0).rstrip(".,") if match else ""
 
 
+def all_urls(text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in re.finditer(r"https?://[^\s<>)\"']+", text):
+        url = match.group(0).rstrip(".,")
+        if url not in seen:
+            urls.append(url)
+            seen.add(url)
+    return urls
+
+
 def first_price(text: str) -> tuple[float | None, str]:
     patterns = [
         r"(?:AUD|USD|AU\$|US\$)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)",
@@ -260,7 +271,46 @@ def classify_reply(body_text: str) -> ReplyExtraction:
     ]
     money_markers = ["rate card", "media kit", "pricing", "price", "cost", "fee", "package", "sponsored", "advertorial", "paid placement", "guest post"]
     process_markers = ["send through", "guidelines", "requirements", "word count", "dofollow", "turnaround", "invoice", "payment", "editorial"]
+    paid_path_markers = [
+        "we accept paid",
+        "we do accept paid",
+        "paid guest post",
+        "paid placement",
+        "sponsored post",
+        "sponsored article",
+        "advertorial",
+        "send your article",
+        "send through your article",
+        "please send your article",
+        "editorial placements",
+    ]
+    unclear_markers = [
+        "send details",
+        "send more details",
+        "share more details",
+        "can you send",
+        "please email",
+        "please contact",
+        "reach out to",
+        "who is the client",
+    ]
+    agency_markers = [
+        "our publishers",
+        "publisher network",
+        "our network",
+        "multiple publishers",
+        "for our clients",
+        "on behalf of",
+        "agency",
+    ]
+    redirect_hosts = ("forms.gle", "docs.google.com", "airtable.com", "typeform.com", "hubspot.com", "notion.so", "notion.site", "trello.com")
     has_money_terms = bool(price_options) or amount is not None or any(marker in lowered for marker in money_markers)
+    has_paid_path = any(marker in lowered for marker in paid_path_markers)
+    has_unclear_terms = any(marker in lowered for marker in unclear_markers)
+    has_agency_signals = any(marker in lowered for marker in agency_markers)
+    has_media_kit_only = ("media kit" in lowered or "rate card" in lowered) and not bool(price_options) and amount is None
+    urls = all_urls(raw_top_text)
+    has_redirect_only = bool(urls) and any(host in url.lower() for url in urls for host in redirect_hosts) and not amount and not price_options
     is_rejection = any(marker in lowered[:600] for marker in strong_reject_markers) or any(re.search(pattern, lowered) for pattern in placement_reject_patterns)
 
     if is_rejection:
@@ -273,21 +323,31 @@ def classify_reply(body_text: str) -> ReplyExtraction:
         deal_status = "archived"
         create_deal = False
         summary = "Auto-reply or submission acknowledgement; no deal terms confirmed."
+    elif has_media_kit_only or has_redirect_only:
+        classification = "needs_review"
+        deal_status = "needs_review"
+        create_deal = False
+        summary = "Reply points to a media kit or third-party form without enough deal detail for automatic sync."
     elif has_money_terms:
         classification = "deal_terms"
         deal_status = "confirmed" if amount is not None else "needs_review"
         create_deal = True
         summary = "Reply appears to include pricing, a rate card/media kit, or paid placement terms."
-    elif any(marker in lowered for marker in process_markers):
+    elif has_paid_path or any(marker in lowered for marker in process_markers):
         classification = "needs_review"
         deal_status = "needs_review"
-        create_deal = True
+        create_deal = has_paid_path and not has_unclear_terms
         summary = "Reply appears to provide a possible paid placement process but needs review."
     else:
         classification = "ignore"
         deal_status = "archived"
         create_deal = False
         summary = "No clear paid placement terms found."
+
+    if classification in {"deal_terms", "needs_review"} and has_agency_signals:
+        classification = "needs_review"
+        deal_status = "needs_review"
+        summary = "Reply may be from an agency or publisher network and needs manual review."
 
     return ReplyExtraction(
         classification=classification,

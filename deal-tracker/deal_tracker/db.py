@@ -84,6 +84,7 @@ create table if not exists instantly_reply_sync (
     received_at text not null default '',
     classification text not null default '',
     extracted_json text not null default '{}',
+    raw_json text not null default '{}',
     processed_at text not null,
     unique(email_id)
 );
@@ -132,6 +133,56 @@ create table if not exists agency_enquiries (
 
 create index if not exists idx_agency_enquiries_user on agency_enquiries(user_id);
 create index if not exists idx_agency_enquiries_deal on agency_enquiries(deal_id);
+
+create table if not exists prospect_imports (
+    id integer primary key autoincrement,
+    source_type text not null default 'paste',
+    source_name text not null default '',
+    status text not null default 'imported',
+    total_rows integer not null default 0,
+    accepted_rows integer not null default 0,
+    duplicate_rows integer not null default 0,
+    rejected_rows integer not null default 0,
+    queued_rows integer not null default 0,
+    summary_json text not null default '{}',
+    created_at text not null
+);
+
+create index if not exists idx_prospect_imports_created on prospect_imports(created_at);
+
+create table if not exists prospect_records (
+    id integer primary key autoincrement,
+    root_domain text not null unique,
+    site_name text not null default '',
+    source_url text not null default '',
+    contact_email text not null default '',
+    niche text not null default '',
+    opportunity_type text not null default '',
+    lifecycle_stage text not null default 'imported',
+    source_name text not null default '',
+    notes text not null default '',
+    first_seen_at text not null,
+    last_seen_at text not null
+);
+
+create index if not exists idx_prospect_records_stage on prospect_records(lifecycle_stage);
+create index if not exists idx_prospect_records_domain on prospect_records(root_domain);
+
+create table if not exists prospect_import_rows (
+    id integer primary key autoincrement,
+    import_id integer not null,
+    input_value text not null default '',
+    root_domain text not null default '',
+    source_url text not null default '',
+    contact_email text not null default '',
+    row_status text not null default 'accepted',
+    reason text not null default '',
+    created_at text not null,
+    foreign key(import_id) references prospect_imports(id)
+);
+
+create index if not exists idx_prospect_import_rows_import on prospect_import_rows(import_id);
+create index if not exists idx_prospect_import_rows_domain on prospect_import_rows(root_domain);
 
 create table if not exists sync_runs (
     id integer primary key autoincrement,
@@ -299,6 +350,9 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 def init_db(db_path: Path = DB_PATH) -> None:
     with connect(db_path) as connection:
         connection.executescript(SCHEMA)
+        reply_sync_columns = {row["name"] for row in connection.execute("pragma table_info(instantly_reply_sync)").fetchall()}
+        if "raw_json" not in reply_sync_columns:
+            connection.execute("alter table instantly_reply_sync add column raw_json text not null default '{}'")
         existing_entities = {row["name"] for row in connection.execute("pragma table_info(publisher_entities)").fetchall()}
         for column, definition in PUBLISHER_ENTITY_EXTRA_COLUMNS.items():
             if column not in existing_entities:

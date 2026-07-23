@@ -1,2 +1,9 @@
 fastapi>=0.111
+python-multipart>=0.0.9
 uvicorn>=0.30
+SQLAlchemy>=2.0,<3
+alembic>=1.13,<2
+psycopg[binary]>=3.2,<4
+httpx>=0.27,<1
+tldextract>=5.1,<6
+beautifulsoup4>=4.12,<5
