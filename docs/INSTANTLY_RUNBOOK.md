@@ -1,4 +1,6 @@
-# Instantly Runbook
+# Legacy Instantly Runbook
+
+> Historical reference only. The current verified-contact, guarded legacy-pause, pilot, health-gate, and reconciliation policy is in [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
 
 ## Environment
 

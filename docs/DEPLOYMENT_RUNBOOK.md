@@ -1,4 +1,6 @@
-# Deployment Runbook
+# Legacy Deployment Runbook
+
+> Recovery reference only. The canonical PostgreSQL/API/worker launch and cutover procedure is in [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
 
 ## Docker Local
 

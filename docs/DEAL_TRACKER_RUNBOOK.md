@@ -1,4 +1,6 @@
-# Deal Tracker Runbook
+# Legacy Deal Tracker Runbook
+
+> Recovery reference only. Use the React console at `/ops` and [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) for the canonical PostgreSQL platform.
 
 ## Run
 

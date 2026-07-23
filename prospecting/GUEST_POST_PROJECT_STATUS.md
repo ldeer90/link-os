@@ -2,9 +2,9 @@
 
 ## Current
 
-- Standalone repo scaffolded.
+- Packaged as the prospecting engine inside the canonical Link OS repository.
 - V1 target: read-only scrape, contact discovery, classification, and CSV export.
-- Instantly integration is not implemented yet.
+- Instantly campaign drafting and explicit paused-campaign creation are implemented; review remains required before launch.
 
 ## Output
 

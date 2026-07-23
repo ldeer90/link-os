@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 from guest_post_prospecting.apify_google import apify_actor_input, apify_items_to_rows, ApifyGoogleHarvestConfig
@@ -44,6 +45,7 @@ from guest_post_prospecting.universe import (
     outward_links_from_page,
     parse_cdxj_lines,
 )
+import guest_post_prospecting.universe as universe_module
 from guest_post_prospecting.utils import clean_domain, is_au_domain, is_australian_candidate_domain, write_csv
 
 
@@ -55,6 +57,38 @@ class GuestPostProspectingTests(unittest.TestCase):
         self.assertFalse(is_au_domain("example.com"))
         self.assertTrue(is_australian_candidate_domain("example.com", 'site:.com "write for us" Australia'))
         self.assertFalse(is_australian_candidate_domain("example.com", 'site:.com "write for us" Canada'))
+
+    def test_manual_seed_can_explicitly_queue_a_public_non_au_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prospecting.db"
+
+            def connect() -> sqlite3.Connection:
+                connection = sqlite3.connect(path)
+                connection.row_factory = sqlite3.Row
+                connection.executescript(SCHEMA)
+                return connection
+
+            original_connect = universe_module.connect
+            universe_module.connect = connect
+            try:
+                result = universe_module.import_seed_domains(
+                    ["example.com"],
+                    source_label="link_os_test",
+                    allow_non_au=True,
+                )
+                self.assertGreater(result["saved_candidate_urls"], 0)
+                self.assertGreater(result["queued_urls"], 0)
+                with connect() as connection:
+                    domains = connection.execute(
+                        "select root_domain from candidate_domains where root_domain='example.com'"
+                    ).fetchall()
+                    queued = connection.execute(
+                        "select count(*) from crawl_queue where root_domain='example.com'"
+                    ).fetchone()[0]
+                self.assertEqual(len(domains), 1)
+                self.assertGreater(queued, 0)
+            finally:
+                universe_module.connect = original_connect
 
     def test_email_extraction_and_ranking(self) -> None:
         html = '<a href="mailto:Editor@Example.com.au">Email</a> info [at] example [dot] com.au'

@@ -1,8 +1,8 @@
 # Guest Post Outreach
 
-Standalone prospecting pipeline for Australian `.com.au` websites that may accept guest posts, sponsored articles, editorial placements, niche edits, or media/advertising packages.
+The Link OS prospecting engine for Australian `.com.au` websites and manually reviewed international domains that may accept guest posts, sponsored articles, editorial placements, niche edits, or media/advertising packages.
 
-V1 is review-first. It creates a local SQLite database and review CSV only; it does not create Instantly campaigns or upload leads.
+The pipeline is review-first. Discovery creates a local SQLite database and review outputs. The Link OS dashboard can now queue pasted or uploaded domains into this database, and campaign tooling can build drafts or explicitly create paused Instantly campaigns after review.
 
 ## Quick Start
 
@@ -99,4 +99,4 @@ data/guest_post_prospecting.db
 - Search scraping and Common Crawl index lookups are best-effort. Search results are cached under `data/raw_domains/search_cache/`.
 - Universe discovery is resumable. Each discovery command writes a `discovery_run_id`; failed crawl URLs remain retryable in `crawl_queue`.
 - The pipeline prefers public role/business emails such as `editor@`, `advertising@`, `media@`, `partnerships@`, `hello@`, `info@`, and `contact@`.
-- Instantly campaign creation is intentionally left for a later, post-review step.
+- Instantly campaign creation is an explicit post-review step. `tools/create_article_submission_instantly_campaign.py` defaults to a local draft; `--execute` creates a paused campaign and uploads the selected leads.

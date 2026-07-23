@@ -1,64 +1,65 @@
-# System Map
+# LINK OS System Map
 
-AU Link Desk has two connected halves.
+## Runtime
 
-## Prospecting
+```text
+Browser / Codex CLI
+        |
+        v
+FastAPI + compiled React console  <---- SSE status stream
+        |
+        v
+PostgreSQL (authoritative state + leased jobs)
+        |
+        v
+Durable worker / scheduler
+   |            |          |          |
+SE Ranking   public web  Instantly  monday.com
+discovery    scraping    authority  deals-only projection
+```
 
-The prospecting system finds domains likely to accept paid guest posts, sponsored articles, advertorials, media packages, or link insertions.
+Docker Compose runs three services: `postgres`, `api`, and `worker`. No Redis or second application database is required.
 
-Discovery routes:
+## Source-of-truth Boundaries
 
-- Search operators such as `site:.com.au "write for us"`, `intitle:"media kit"`, `inurl:advertise`, and Australian-context `.com` searches.
-- Competitor backlink/source-domain exports from SE Ranking, Semrush, Ahrefs, or CSV.
-- Contact discovery through homepages, known paths, sitemaps, robots files, same-site links, public search, and role-email ranking.
+- PostgreSQL owns backlink analyses, credit usage, candidates and review decisions plus imports, domains, lifecycle events, evidence, contacts, suppressions, verification, jobs, campaign reservations, replies, offers, publisher entities, listings, mappings, worker runs, users, sessions, and audit logs.
+- SE Ranking is the paid backlink-data provider. LINK OS owns caps, caching, provider request hashes, checkpoints and review state; credentials are never stored in PostgreSQL.
+- Instantly is authoritative for sender connection, remote campaign and lead state, delivery analytics, email threads, and replies. Reconciliation is idempotent by provider IDs.
+- monday.com is a one-way, deals-only projection for Publisher Inventory, Publisher Entities, Reply Review, and Sync Log.
+- BigQuery may receive aggregate analytics only. It does not operate queues and does not receive new raw email or reply content.
+- Legacy SQLite databases are read-only recovery sources after snapshot-first migration.
 
-Key outputs:
+## Lifecycle
 
-- `prospecting/generated/search_harvest/*.csv`
-- `prospecting/generated/guest_post_prospecting/paid_link_acceptance_review.csv`
-- `deal-tracker/generated/imports/combined_filtered_link_prospects_review.csv`
-- `deal-tracker/generated/imports/combined_link_prospects_contact_discovery_review.csv`
-- `deal-tracker/generated/imports/likely_guest_post_candidates_strict.csv`
+```text
+imported -> queued -> scraping -> email_found / no_email / failed
+         -> verified / suppressed -> outreach_ready -> campaign_queued
+         -> uploaded -> contacted -> replied -> offer_approved / offer_review
+         -> listed / lost
+```
 
-## Outreach
+Transitions are recorded as domain events. Contact and domain uniqueness use normalized emails and registrable domains. Shared publisher contacts are represented separately so one email can cover several sites without duplicate outreach.
 
-Approved leads are pushed to Instantly with the subject `Article Submission Info Request`.
+## Intake and Crawling
 
-Lead imports include:
+The API accepts pasted domains/URLs and streamed CSV/TSV files without a business-level row cap. Imports return an ID immediately and are processed in bounded chunks. The crawler accepts valid public domains across TLDs, obeys robots rules, uses one request per host with a host delay, and only records emails visibly present on public pages.
 
-- Email and website
-- Root domain and site name
-- Source URL/evidence
-- Opportunity type
-- Niche/category
-- Custom variables for personalization
+## Backlink Discovery
 
-Campaigns stay reviewable before launch and use duplicate protection.
+Competitor mining and client-profile audits use the same API, PostgreSQL queue, audit log and SSE stream as every other LINK OS operation. Initial competitor runs request one authority-ranked example per referring domain. Thirty-day cache hits cost zero; later refreshes use new referring-domain history from the last checkpoint. Local protected-domain exclusions run before Codex review.
 
-## Deal Tracker
+Rejected candidates remain discovery records and never create canonical domains. Approved competitor candidates enter the normal import pipeline. Client-profile audit candidates are permanently audit-only. The default run cap is 500 credits, with a 2,500 hard run maximum and 10,000 configurable monthly LINK OS cap.
 
-The deal tracker syncs Instantly replies and stores any reply that gives pricing, requirements, rate cards, or a clear paid-placement path.
+## Outreach Control
 
-Admin inventory tracks:
+Campaign membership is transactionally reserved in PostgreSQL before a paused Instantly campaign is created. Upload counts, lead readback, verification state, sender exclusivity, daily limits, safety metrics, global pause, full reconciliation, and legacy-pause confirmation are all reread before activation.
 
-- Publisher cost and reseller price
-- Link insertion cost
-- Domain Trust
-- Placement type
-- Writing and link requirements
-- Turnaround
-- Restrictions
-- Raw reply evidence
-- Publisher entity
-- Listing/review status
+The scheduler polls replies every ten minutes, analytics and managed delivery state every fifteen minutes, and performs a full workspace membership reconciliation daily. Public webhooks can replace polling later when a callback URL exists.
 
-Agency users only see approved public catalogue fields according to their visibility tier.
+Monday receives a single-flight, one-way deals projection to four pinned boards. Destination access, schema/status labels, canonical mappings, remote item locations, and duplicate targets are preflighted before writes. Full reply correspondence remains in LINK OS.
 
-## Feedback Loop
+## Operator Surfaces
 
-Replies improve future prospecting:
-
-- Rejections become suppression/exclusion signals.
-- Network replies create multiple publisher rows under one entity.
-- Corrected dofollow/nofollow pricing updates inventory rules.
-- Agency demand highlights niches for new prospecting runs.
+- React console at `/ops` for overview, intake, domains, scraping, backlink discovery, campaigns, replies/offers, inventory, agencies, settings, and integration health.
+- Versioned JSON APIs under `/api/v1` plus server-sent events.
+- `link_os_cli.py` for health, imports, backlink estimates/execution/review, reconciliation, job retry, pause/resume, and migration.

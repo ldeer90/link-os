@@ -547,10 +547,11 @@ def upsert_candidate_url(
     title: str = "",
     status: str = "new",
     evidence_score: int = 0,
+    allow_non_au: bool = False,
 ) -> bool:
     normalized = normalize_url(url)
     root_domain = clean_domain(root_domain_from_url(normalized))
-    if not normalized or not is_au_domain(root_domain):
+    if not normalized or (not allow_non_au and not is_au_domain(root_domain)):
         return False
     timestamp = now_iso()
     with connect() as connection:
@@ -587,10 +588,17 @@ def upsert_candidate_url(
     return True
 
 
-def enqueue_url(url: str, root_domain: str | None = None, *, reason: str = "", priority: int = 50) -> bool:
+def enqueue_url(
+    url: str,
+    root_domain: str | None = None,
+    *,
+    reason: str = "",
+    priority: int = 50,
+    allow_non_au: bool = False,
+) -> bool:
     normalized = normalize_url(url)
     domain = clean_domain(root_domain or root_domain_from_url(normalized))
-    if not normalized or not is_au_domain(domain):
+    if not normalized or (not allow_non_au and not is_au_domain(domain)):
         return False
     timestamp = now_iso()
     with connect() as connection:
@@ -609,8 +617,8 @@ def enqueue_url(url: str, root_domain: str | None = None, *, reason: str = "", p
     return True
 
 
-def import_seed_domains(items: list[str], *, source_label: str = "manual_seed") -> dict[str, object]:
-    run_id = start_run("manual_seed", {"items": len(items), "source_label": source_label})
+def import_seed_domains(items: list[str], *, source_label: str = "manual_seed", allow_non_au: bool = False) -> dict[str, object]:
+    run_id = start_run("manual_seed", {"items": len(items), "source_label": source_label, "allow_non_au": allow_non_au})
     saved = 0
     queued = 0
     for item in items:
@@ -623,7 +631,7 @@ def import_seed_domains(items: list[str], *, source_label: str = "manual_seed") 
         else:
             domain = clean_domain(raw)
             url = f"https://{domain}/"
-        if not is_au_domain(domain):
+        if not allow_non_au and not is_au_domain(domain):
             continue
         match = classify_opportunity(source_label, url)
         if upsert_candidate_url(
@@ -634,9 +642,10 @@ def import_seed_domains(items: list[str], *, source_label: str = "manual_seed") 
             matched_phrase=match.matched_phrase,
             title=domain,
             evidence_score=40,
+            allow_non_au=allow_non_au,
         ):
             saved += 1
-        if enqueue_url(url, domain, reason=source_label, priority=5):
+        if enqueue_url(url, domain, reason=source_label, priority=5, allow_non_au=allow_non_au):
             queued += 1
         for path in PATH_PROBES:
             probe_url = f"https://{domain}{path}"
@@ -649,9 +658,16 @@ def import_seed_domains(items: list[str], *, source_label: str = "manual_seed") 
                 matched_phrase=probe_match.matched_phrase,
                 title=domain,
                 evidence_score=12,
+                allow_non_au=allow_non_au,
             ):
                 saved += 1
-            if enqueue_url(probe_url, domain, reason=f"{source_label}:path_probe", priority=8):
+            if enqueue_url(
+                probe_url,
+                domain,
+                reason=f"{source_label}:path_probe",
+                priority=8,
+                allow_non_au=allow_non_au,
+            ):
                 queued += 1
     record_source(run_id=run_id, source_type="manual_seed", source_key=source_label, source_query=source_label, status="ok", result_count=saved)
     finish_run(run_id)
