@@ -41,10 +41,10 @@ class OfferReviewTests(unittest.TestCase):
         self.assertFalse(decision.auto_approved)
         self.assertIn("attachment_only_or_attachment_dependent", decision.review_reasons)
 
-    def test_reseller_formula_uses_larger_floor_and_rounds_up_to_ten(self) -> None:
-        self.assertEqual(reseller_price_aud(100, 1), Decimal("200"))
-        self.assertEqual(reseller_price_aud(300, 1), Decimal("450"))
-        self.assertEqual(reseller_price_aud(101, 1), Decimal("210"))
+    def test_reseller_formula_uses_exact_40_percent_markup(self) -> None:
+        self.assertEqual(reseller_price_aud(100, 1), Decimal("140"))
+        self.assertEqual(reseller_price_aud(300, 1), Decimal("420"))
+        self.assertEqual(reseller_price_aud(101, 1), Decimal("141.40"))
 
 
 if __name__ == "__main__":

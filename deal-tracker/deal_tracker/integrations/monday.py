@@ -43,6 +43,10 @@ BOARD_COLUMNS = {
         ("Publisher Cost", "numbers"),
         ("Publisher Currency", "text"),
         ("Reseller Price", "numbers"),
+        ("Reseller Currency", "text"),
+        ("Link Insert Cost", "numbers"),
+        ("Link Insert Currency", "text"),
+        ("Link Insert Reseller", "numbers"),
         ("Review Status", "text"),
         ("Local Offer ID", "text"),
         ("Last Synced", "date"),
@@ -87,6 +91,10 @@ COLUMN_ALIASES = {
 
 OPTIONAL_COLUMNS = {
     ("inventory", "Local Offer ID"),
+    ("inventory", "Reseller Currency"),
+    ("inventory", "Link Insert Cost"),
+    ("inventory", "Link Insert Currency"),
+    ("inventory", "Link Insert Reseller"),
     ("entities", "Local Entity ID"),
     ("replies", "Local Reply ID"),
 }
@@ -95,6 +103,8 @@ STATUS_COMPATIBLE_COLUMNS = {
     ("inventory", "Deal Status"),
     ("inventory", "Placement Type"),
     ("inventory", "Publisher Currency"),
+    ("inventory", "Reseller Currency"),
+    ("inventory", "Link Insert Currency"),
     ("inventory", "Review Status"),
     ("replies", "Classification"),
     ("replies", "Review Action"),
@@ -266,6 +276,13 @@ def projection_rows(session: Session) -> list[ProjectionRow]:
                         "Publisher Cost": float(offer.original_amount) if offer.original_amount is not None else "",
                         "Publisher Currency": offer.original_currency or "",
                         "Reseller Price": float(offer.reseller_price_aud) if offer.reseller_price_aud is not None else "",
+                        "Reseller Currency": "AUD" if offer.reseller_price_aud is not None else "",
+                        # Canonical LINK OS projects one placement per row. Clear
+                        # the legacy combined-offer columns so an old link-edit
+                        # price cannot conflict with its canonical niche-edit row.
+                        "Link Insert Cost": "",
+                        "Link Insert Currency": "",
+                        "Link Insert Reseller": "",
                         "Review Status": offer.status.value,
                         "Local Offer ID": offer.id,
                         "Last Synced": now,

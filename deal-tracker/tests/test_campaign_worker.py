@@ -3,24 +3,88 @@ from __future__ import annotations
 from datetime import timedelta
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from deal_tracker.platform.enums import CampaignBatchStatus, LifecycleStage, VerificationStatus
 from deal_tracker.platform.models import (
     Base,
     CampaignBatch,
+    CampaignLaunch,
     Contact,
     Domain,
     DomainContactEvidence,
     Job,
     SenderAccount,
+    Suppression,
     SystemSetting,
     VerificationResult,
     utcnow,
 )
 from deal_tracker.platform.repositories import JobQueue, set_outreach_paused
-from deal_tracker.worker import _next_campaign_request, prepare_campaign_batch_job
+from deal_tracker.worker import (
+    _activation_bounce_rate,
+    _next_campaign_request,
+    _queue_bounce_recovery,
+    prepare_campaign_batch_job,
+)
+
+
+def test_segmented_launch_uses_three_hard_bounces_instead_of_rate_gate() -> None:
+    launch = CampaignLaunch(hard_bounce_limit=3)
+    assert _activation_bounce_rate(
+        launch=launch, hard_bounce_count=1, rolling_bounce_rate=0.5
+    ) == 0.0
+    assert _activation_bounce_rate(
+        launch=launch, hard_bounce_count=3, rolling_bounce_rate=0.5
+    ) == 0.5
+    launch.settings_snapshot = {"ignore_hard_bounces": True}
+    assert _activation_bounce_rate(
+        launch=launch, hard_bounce_count=100, rolling_bounce_rate=1.0
+    ) == 0.0
+
+
+def test_hard_bounce_queues_one_idempotent_alternate_contact_recrawl() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(engine, expire_on_commit=False)
+    with Session() as session:
+        domain = Domain(
+            normalized_domain="publisher.example",
+            first_input_value="publisher.example",
+            tld="example",
+            lifecycle_stage=LifecycleStage.CONTACTED,
+            last_contacted_at=utcnow(),
+        )
+        contact = Contact(
+            normalized_email="dead@publisher.example",
+            original_email="dead@publisher.example",
+            email_domain="publisher.example",
+        )
+        session.add_all([domain, contact])
+        session.flush()
+        session.add(
+            Suppression(
+                domain_id=domain.id,
+                contact_id=contact.id,
+                scope="contact",
+                reason="instantly_bounced",
+                source="instantly",
+                permanent=True,
+                active=True,
+            )
+        )
+        first = _queue_bounce_recovery(session, domain, contact)
+        second = _queue_bounce_recovery(session, domain, contact)
+        session.flush()
+
+        assert first is not None and second is not None
+        assert first.id == second.id
+        assert domain.lifecycle_stage == LifecycleStage.QUEUED
+        assert domain.last_contacted_at is None
+        assert first.payload["excluded_contact_ids"] == [contact.id]
+        assert first.payload["skip_verification"] is True
+        assert session.scalar(select(func.count(Job.id))) == 1
 
 
 class FakeInstantly:

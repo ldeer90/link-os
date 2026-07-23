@@ -65,7 +65,7 @@ class CampaignUploadSnapshot:
     built_paused: bool
     pending_verifications: int
     tracking_enabled: bool
-    unsubscribe_header_enabled: bool
+    unsubscribe_method_present: bool
     stop_on_reply: bool
     stop_on_auto_reply: bool
     stop_on_company_reply: bool
@@ -139,8 +139,8 @@ def evaluate_campaign_activation(
         reasons.append("pending_verification")
     if campaign.tracking_enabled:
         reasons.append("tracking_must_be_disabled")
-    if not campaign.unsubscribe_header_enabled:
-        reasons.append("unsubscribe_header_missing")
+    if not campaign.unsubscribe_method_present:
+        reasons.append("unsubscribe_method_missing")
     if not campaign.stop_on_reply:
         reasons.append("stop_on_reply_disabled")
     if not campaign.stop_on_auto_reply:

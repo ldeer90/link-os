@@ -31,12 +31,14 @@ from deal_tracker.integrations.instantly import (
     InstantlyControl,
     matching_campaigns,
     campaign_is_link_building,
+    has_reply_stop_instruction,
     reply_sync_campaigns,
     safe_campaign_payload,
     sender_is_healthy,
     verification_is_eligible,
 )
 from deal_tracker.integrations.monday import DealsOnlyProjector
+from deal_tracker.inventory import ensure_private_listing
 from deal_tracker.offer_review import evaluate_offer
 from deal_tracker.platform.enums import (
     CampaignBatchStatus,
@@ -65,6 +67,7 @@ from deal_tracker.platform.models import (
     Contact,
     Domain,
     DomainContactEvidence,
+    DomainEvent,
     ImportBatch,
     ImportItem,
     InstantlyEvent,
@@ -104,6 +107,21 @@ SPLIT_VALUES = re.compile(r"[\s,;\t]+")
 PILOT_BATCH_SIZE = 25
 NORMAL_BATCH_SIZE = 250
 HEALTH_GATE_HOURS = 72
+
+
+def _activation_bounce_rate(
+    *,
+    launch: CampaignLaunch | None,
+    hard_bounce_count: int,
+    rolling_bounce_rate: float | None,
+) -> float | None:
+    """Apply the launch-specific hard-bounce threshold during activation."""
+
+    if launch is not None and (launch.settings_snapshot or {}).get("ignore_hard_bounces") is True:
+        return 0.0
+    if launch is not None and hard_bounce_count < launch.hard_bounce_limit:
+        return 0.0
+    return rolling_bounce_rate
 
 
 class NonRetryableJobError(RuntimeError):
@@ -196,10 +214,82 @@ def _active_suppression(session: Session, *, domain_id: str, contact_id: str | N
     now = utcnow()
     statement = select(Suppression.id).where(
         Suppression.active.is_(True),
-        (Suppression.domain_id == domain_id) | ((Suppression.contact_id == contact_id) if contact_id else (Suppression.id == "")),
+        (
+            ((Suppression.scope == "domain") & (Suppression.domain_id == domain_id))
+            | (
+                ((Suppression.scope == "contact") & (Suppression.contact_id == contact_id))
+                if contact_id
+                else (Suppression.id == "")
+            )
+        ),
         (Suppression.expires_at.is_(None)) | (Suppression.expires_at > now),
     )
     return session.scalar(statement.limit(1)) is not None
+
+
+def _contact_is_suppressed(session: Session, contact_id: str) -> bool:
+    now = utcnow()
+    return session.scalar(
+        select(Suppression.id).where(
+            Suppression.scope == "contact",
+            Suppression.contact_id == contact_id,
+            Suppression.active.is_(True),
+            (Suppression.expires_at.is_(None)) | (Suppression.expires_at > now),
+        ).limit(1)
+    ) is not None
+
+
+def _queue_bounce_recovery(session: Session, domain: Domain, contact: Contact) -> Job | None:
+    if domain.lifecycle_stage in {
+        LifecycleStage.SUPPRESSED,
+        LifecycleStage.REPLIED,
+        LifecycleStage.OFFER_REVIEW,
+        LifecycleStage.OFFER_APPROVED,
+        LifecycleStage.LISTED,
+        LifecycleStage.LOST,
+    }:
+        return None
+    if session.scalar(
+        select(Suppression.id).where(
+            Suppression.scope == "domain",
+            Suppression.domain_id == domain.id,
+            Suppression.active.is_(True),
+            (Suppression.expires_at.is_(None)) | (Suppression.expires_at > utcnow()),
+        ).limit(1)
+    ) is not None:
+        return None
+    job, created = JobQueue(session).enqueue(
+        kind="scrape_domain",
+        idempotency_key=f"scrape_domain:{domain.id}:bounce_recovery:{contact.id}",
+        subject_type="domain",
+        subject_id=domain.id,
+        payload={
+            "domain_id": domain.id,
+            "recovery_reason": "hard_bounce",
+            "excluded_contact_ids": [contact.id],
+            "skip_verification": True,
+        },
+        priority=60,
+        max_attempts=3,
+    )
+    if created:
+        previous_stage = domain.lifecycle_stage
+        domain.lifecycle_stage = LifecycleStage.QUEUED
+        domain.stage_changed_at = utcnow()
+        domain.last_contacted_at = None
+        domain.next_refresh_at = None
+        session.add(
+            DomainEvent(
+                domain_id=domain.id,
+                event_type="bounce_recovery_queued",
+                from_stage=previous_stage,
+                to_stage=LifecycleStage.QUEUED,
+                reason="Hard-bounced address suppressed; searching for a different public contact",
+                source="instantly_bounce_recovery",
+                payload={"excluded_contact_id": contact.id, "job_id": job.id},
+            )
+        )
+    return job
 
 
 def _get_or_create_pasted_contact(session: Session, email: str) -> Contact:
@@ -454,6 +544,10 @@ def scrape_domain_job(job_id: str, config: WorkerConfig) -> dict[str, Any]:
         if job is None:
             raise LookupError(f"job {job_id} disappeared")
         domain_id = str(job.payload.get("domain_id") or job.subject_id or "")
+        excluded_contact_ids = {
+            str(value) for value in (job.payload.get("excluded_contact_ids") or [])
+        }
+        skip_verification = job.payload.get("skip_verification") is True
         domain = session.get(Domain, domain_id)
         if domain is None:
             raise LookupError(f"domain {domain_id} does not exist")
@@ -576,10 +670,6 @@ def scrape_domain_job(job_id: str, config: WorkerConfig) -> dict[str, Any]:
                     rejected_contacts += 1
                     continue
                 valid_evidence.append((evidence, normalized_email))
-            attempt.metrics["rejected_contacts"] = rejected_contacts
-            attempt.emails_found = len(valid_evidence)
-            accepted_contacts = len(valid_evidence)
-
             for evidence, normalized_email in valid_evidence:
                 contact = session.scalar(select(Contact).where(Contact.normalized_email == normalized_email))
                 if contact is None:
@@ -593,6 +683,9 @@ def scrape_domain_job(job_id: str, config: WorkerConfig) -> dict[str, Any]:
                     )
                     session.add(contact)
                     session.flush()
+                if contact.id in excluded_contact_ids or _contact_is_suppressed(session, contact.id):
+                    rejected_contacts += 1
+                    continue
                 evidence_key = hashlib.sha256(
                     f"{domain.id}|{contact.id}|{evidence.source_url}|{evidence.evidence_text}".encode("utf-8")
                 ).hexdigest()
@@ -609,18 +702,22 @@ def scrape_domain_job(job_id: str, config: WorkerConfig) -> dict[str, Any]:
                             is_public_page=True,
                         )
                     )
-                JobQueue(session).enqueue(
-                    kind="verify_contact",
-                    idempotency_key=f"verify_contact:{contact.id}:initial",
-                    subject_type="contact",
-                    subject_id=contact.id,
-                    payload={"contact_id": contact.id, "poll_count": 0},
-                    priority=40,
-                    max_attempts=3,
-                )
-            if valid_evidence:
+                accepted_contacts += 1
+                if not skip_verification:
+                    JobQueue(session).enqueue(
+                        kind="verify_contact",
+                        idempotency_key=f"verify_contact:{contact.id}:initial",
+                        subject_type="contact",
+                        subject_id=contact.id,
+                        payload={"contact_id": contact.id, "poll_count": 0},
+                        priority=40,
+                        max_attempts=3,
+                    )
+            attempt.metrics["rejected_contacts"] = rejected_contacts
+            attempt.emails_found = accepted_contacts
+            if accepted_contacts:
                 attempt.status = ScrapeStatus.SUCCEEDED
-                DomainRepository(session).transition(domain.id, LifecycleStage.EMAIL_FOUND, source="crawler", reason=f"{len(valid_evidence)} publicly evidenced contacts")
+                DomainRepository(session).transition(domain.id, LifecycleStage.EMAIL_FOUND, source="crawler", reason=f"{accepted_contacts} publicly evidenced contacts")
                 domain.next_refresh_at = None
             else:
                 final_status = "no_email"
@@ -844,12 +941,21 @@ def reconcile_instantly_job(job_id: str | None = None, *, force_full: bool = Fal
                     )
                     unhealthy = not (sender.connected and sender.provider_status == 1 and not sender.last_error)
                     launch = session.get(CampaignLaunch, batch.launch_id) if batch.launch_id else None
+                    ignore_hard_bounces = bool(
+                        launch and (launch.settings_snapshot or {}).get("ignore_hard_bounces") is True
+                    )
+                    provider_bounce_override = bool(
+                        launch
+                        and (launch.settings_snapshot or {}).get("provider_bounce_protection_disabled") is True
+                    )
+                    if provider_bounce_override:
+                        sender.bounce_protection_triggered = False
                     local_launch_safety = bool(
                         launch
                         and (
-                            batch.hard_bounce_count >= launch.hard_bounce_limit
+                            (not ignore_hard_bounces and batch.hard_bounce_count >= launch.hard_bounce_limit)
                             or batch.unsubscribe_count >= 1
-                            or sender.bounce_protection_triggered
+                            or (not provider_bounce_override and sender.bounce_protection_triggered)
                         )
                     )
                     unsafe_metrics = local_launch_safety or (
@@ -874,7 +980,7 @@ def reconcile_instantly_job(job_id: str | None = None, *, force_full: bool = Fal
                             reasons.append("global_outreach_pause")
                         if unhealthy:
                             reasons.append("sender_unhealthy")
-                        if launch and batch.hard_bounce_count >= launch.hard_bounce_limit:
+                        if launch and not ignore_hard_bounces and batch.hard_bounce_count >= launch.hard_bounce_limit:
                             reasons.append("three_hard_bounces")
                         elif not launch and sender.rolling_bounce_rate >= 0.03:
                             reasons.append("bounce_rate_at_or_above_3_percent")
@@ -882,7 +988,7 @@ def reconcile_instantly_job(job_id: str | None = None, *, force_full: bool = Fal
                             reasons.append("campaign_unsubscribe_recorded")
                         elif not launch and sender.rolling_unsubscribe_rate >= 0.01:
                             reasons.append("unsubscribe_rate_at_or_above_1_percent")
-                        if sender.bounce_protection_triggered:
+                        if sender.bounce_protection_triggered and not provider_bounce_override:
                             reasons.append("bounce_protection_triggered")
                         if remote_status == -99:
                             reasons.append("account_suspended")
@@ -1142,18 +1248,16 @@ def reconcile_instantly_job(job_id: str | None = None, *, force_full: bool = Fal
                                 LifecycleStage.LISTED,
                                 LifecycleStage.LOST,
                             }:
-                                target = (
-                                    LifecycleStage.SUPPRESSED
-                                    if lead_status == -2
-                                    else LifecycleStage.CONTACTED
-                                )
-                                _authoritative_stage(
-                                    session,
-                                    domain,
-                                    target,
-                                    source=reason,
-                                )
-                                domain.last_contacted_at = domain.last_contacted_at or utcnow()
+                                if lead_status == -1:
+                                    _queue_bounce_recovery(session, domain, contact)
+                                else:
+                                    _authoritative_stage(
+                                        session,
+                                        domain,
+                                        LifecycleStage.SUPPRESSED,
+                                        source=reason,
+                                    )
+                                    domain.last_contacted_at = domain.last_contacted_at or utcnow()
                         elif lead_status == 3:
                             if member:
                                 member.status = CampaignMemberStatus.CONTACTED
@@ -1525,10 +1629,13 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
         sender = session.get(SenderAccount, sender_id)
         if batch is None or sender is None:
             raise LookupError("campaign reservation disappeared")
+        settings = dict(batch.settings_snapshot or {})
+        provider_bounce_override = settings.get("provider_bounce_protection_disabled") is True
         payload = safe_campaign_payload(
             batch_number=batch_number,
             sender=sender.sender_email or str(account.get("email") or ""),
             pilot=pilot,
+            provider_bounce_protection_enabled=not provider_bounce_override,
         )
         payload["name"] = batch.name
         batch.settings_snapshot = {**(batch.settings_snapshot or {}), "campaign": payload}
@@ -1617,9 +1724,12 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
         batch.uploaded_member_count = len(readback_by_email)
         batch.readback_member_count = len(readback_by_email)
         batch.pending_verification_count = pending
+        batch.hard_bounce_count = int(analytics.get("bounced_count") or 0)
+        batch.unsubscribe_count = int(analytics.get("unsubscribed_count") or 0)
         batch.status = CampaignBatchStatus.PAUSED
         sender.rolling_bounce_rate = bounce_rate
         sender.rolling_unsubscribe_rate = unsubscribe_rate
+        launch = session.get(CampaignLaunch, batch.launch_id) if batch.launch_id else None
         for member, contact, domain in session.execute(
             select(CampaignMember, Contact, Domain)
             .join(Contact, Contact.id == CampaignMember.contact_id)
@@ -1657,7 +1767,11 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
                 active_link_os_campaigns=other_active,
                 new_leads_sent_today=sender.new_leads_sent_today,
                 total_emails_sent_today=sender.total_emails_sent_today,
-                bounce_rate=sender.rolling_bounce_rate,
+                bounce_rate=_activation_bounce_rate(
+                    launch=launch,
+                    hard_bounce_count=batch.hard_bounce_count,
+                    rolling_bounce_rate=sender.rolling_bounce_rate,
+                ),
                 unsubscribe_rate=sender.rolling_unsubscribe_rate,
                 has_error=bool(sender.last_error),
                 bounce_protection_triggered=sender.bounce_protection_triggered,
@@ -1669,11 +1783,17 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
                 built_paused=campaign_readback.get("status") != 1,
                 pending_verifications=batch.pending_verification_count,
                 tracking_enabled=bool(payload.get("open_tracking") or payload.get("link_tracking")),
-                unsubscribe_header_enabled=payload.get("insert_unsubscribe_header") is True,
+                unsubscribe_method_present=(
+                    payload.get("insert_unsubscribe_header") is True
+                    or has_reply_stop_instruction(payload.get("sequences") or [])
+                ),
                 stop_on_reply=payload.get("stop_on_reply") is True,
                 stop_on_auto_reply=payload.get("stop_on_auto_reply") is True,
                 stop_on_company_reply=payload.get("stop_for_company") is True,
-                bounce_protection_enabled=payload.get("disable_bounce_protect") is False,
+                bounce_protection_enabled=(
+                    payload.get("disable_bounce_protect") is False
+                    or provider_bounce_override
+                ),
                 risky_contacts_enabled=payload.get("allow_risky_contacts") is True,
             ),
         )
@@ -1769,6 +1889,11 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
         sender = session.get(SenderAccount, sender_id)
         if batch is None or sender is None:
             raise LookupError("campaign state disappeared before activation")
+        launch = session.get(CampaignLaunch, batch.launch_id) if batch.launch_id else None
+        provider_bounce_override = bool(
+            launch
+            and (launch.settings_snapshot or {}).get("provider_bounce_protection_disabled") is True
+        )
         sender.new_leads_sent_today = sum(
             int(row.get("new_leads_contacted_count") or 0)
             for row in sender_today_rows
@@ -1796,12 +1921,17 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
                 active_link_os_campaigns=other_active + len(active_remote_others),
                 new_leads_sent_today=sender.new_leads_sent_today,
                 total_emails_sent_today=sender.total_emails_sent_today,
-                bounce_rate=sender.rolling_bounce_rate,
+                bounce_rate=_activation_bounce_rate(
+                    launch=launch,
+                    hard_bounce_count=batch.hard_bounce_count,
+                    rolling_bounce_rate=sender.rolling_bounce_rate,
+                ),
                 unsubscribe_rate=sender.rolling_unsubscribe_rate,
                 has_error=not bool(live_account and sender_is_healthy(live_account)),
                 bounce_protection_triggered=(
-                    sender.bounce_protection_triggered
-                    or live_campaign.get("status") == -2
+                    False
+                    if provider_bounce_override
+                    else sender.bounce_protection_triggered or live_campaign.get("status") == -2
                 ),
             ),
             campaign=CampaignUploadSnapshot(
@@ -1811,11 +1941,17 @@ def prepare_campaign_batch_job(job_id: str) -> dict[str, Any]:
                 built_paused=live_campaign.get("status") not in {1, 4},
                 pending_verifications=batch.pending_verification_count,
                 tracking_enabled=bool(payload.get("open_tracking") or payload.get("link_tracking")),
-                unsubscribe_header_enabled=payload.get("insert_unsubscribe_header") is True,
+                unsubscribe_method_present=(
+                    payload.get("insert_unsubscribe_header") is True
+                    or has_reply_stop_instruction(payload.get("sequences") or [])
+                ),
                 stop_on_reply=payload.get("stop_on_reply") is True,
                 stop_on_auto_reply=payload.get("stop_on_auto_reply") is True,
                 stop_on_company_reply=payload.get("stop_for_company") is True,
-                bounce_protection_enabled=payload.get("disable_bounce_protect") is False,
+                bounce_protection_enabled=(
+                    payload.get("disable_bounce_protect") is False
+                    or provider_bounce_override
+                ),
                 risky_contacts_enabled=payload.get("allow_risky_contacts") is True,
             ),
         )
@@ -2303,6 +2439,8 @@ def sync_replies_job() -> dict[str, Any]:
                             approved_by="link-os:auto" if auto_approved else None,
                         )
                         session.add(offer)
+                        session.flush()
+                        ensure_private_listing(session, offer)
                         offers_created += 1
                         if auto_approved:
                             _authoritative_stage(session, domain, LifecycleStage.OFFER_APPROVED, source="strict_offer_parser")

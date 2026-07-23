@@ -12,6 +12,7 @@ from deal_tracker.integrations.instantly import (
     analytics_blockers,
     matching_campaigns,
     campaign_is_link_building,
+    has_reply_stop_instruction,
     reply_sync_campaigns,
     render_campaign_text,
     safe_campaign_payload,
@@ -48,12 +49,19 @@ class InstantlyControlTests(unittest.TestCase):
         self.assertFalse(payload["disable_bounce_protect"])
         self.assertFalse(payload["open_tracking"])
         self.assertFalse(payload["link_tracking"])
-        self.assertTrue(payload["insert_unsubscribe_header"])
+        self.assertFalse(payload["insert_unsubscribe_header"])
+        self.assertTrue(has_reply_stop_instruction(payload["sequences"]))
         self.assertEqual(len(payload["sequences"][0]["steps"]), 6)
         self.assertEqual(
             [step["delay"] for step in payload["sequences"][0]["steps"]],
             [2, 3, 5, 7, 10, 14],
         )
+        override = safe_campaign_payload(
+            batch_number=2,
+            sender="sender@example.com",
+            provider_bounce_protection_enabled=False,
+        )
+        self.assertTrue(override["disable_bounce_protect"])
 
     def test_campaign_copy_renders_without_template_tokens(self) -> None:
         payload = safe_campaign_payload(batch_number=1, sender="sender@example.com")
@@ -68,6 +76,13 @@ class InstantlyControlTests(unittest.TestCase):
         self.assertTrue(rendered[0].startswith("Hi Laurence,"))
         self.assertIn("Example Publisher", rendered[0])
         self.assertTrue(all("{{" not in body for body in rendered))
+        self.assertTrue(
+            all(
+                "\n\nRegards,\n\nLaurence\nLD Search\nldsearch.com.au\n\n"
+                in body
+                for body in rendered
+            )
+        )
 
     def test_test_email_uses_rendered_text_and_safe_html(self) -> None:
         calls = []
@@ -102,9 +117,13 @@ class InstantlyControlTests(unittest.TestCase):
             "campaign-1",
             name="LINK OS | Public Evidence Pilot",
             sequences=sequences,
+            insert_unsubscribe_header=False,
+            disable_bounce_protect=True,
         )
         self.assertEqual(result["name"], "LINK OS | Public Evidence Pilot")
         self.assertEqual(result["sequences"], sequences)
+        self.assertFalse(result["insert_unsubscribe_header"])
+        self.assertTrue(result["disable_bounce_protect"])
 
     def test_metrics_thresholds_pause_at_boundary(self) -> None:
         self.assertEqual(

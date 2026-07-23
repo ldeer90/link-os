@@ -593,8 +593,14 @@ class CampaignRepository:
             .where(
                 Suppression.active.is_(True),
                 or_(
-                    Suppression.domain_id == domain_id,
-                    Suppression.contact_id == contact_id,
+                    and_(
+                        Suppression.scope == "domain",
+                        Suppression.domain_id == domain_id,
+                    ),
+                    and_(
+                        Suppression.scope == "contact",
+                        Suppression.contact_id == contact_id,
+                    ),
                 ),
                 or_(Suppression.expires_at.is_(None), Suppression.expires_at > instant),
             )

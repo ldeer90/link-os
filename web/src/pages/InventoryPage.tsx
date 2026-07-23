@@ -45,12 +45,13 @@ export function InventoryPage() {
       </div>
       {resource.loading && !resource.data ? <PageSkeleton /> : resource.error && !resource.data ? <ErrorState error={resource.error} onRetry={resource.reload} title="Inventory is unavailable" /> : visible.length ? (
         <TableShell label="Publisher inventory">
-          <thead><tr><th className={tableHeaderClass}>Domain</th><th className={tableHeaderClass}>Placement</th><th className={tableHeaderClass}>Private AUD</th><th className={tableHeaderClass}>Visibility</th><th className={tableHeaderClass}>Enquiries</th><th className={tableHeaderClass}>Updated</th><th className={tableHeaderClass}>Action</th></tr></thead>
+          <thead><tr><th className={tableHeaderClass}>Domain</th><th className={tableHeaderClass}>Placement</th><th className={tableHeaderClass}>Cost to You (AUD)</th><th className={tableHeaderClass}>Resell Price (Cost + 40%)</th><th className={tableHeaderClass}>Visibility</th><th className={tableHeaderClass}>Enquiries</th><th className={tableHeaderClass}>Updated</th><th className={tableHeaderClass}>Action</th></tr></thead>
           <tbody>{visible.map((listing) => {
             const isListed = (listing.visibility ?? listing.status) === "listed";
             return <tr className="bg-white" key={listing.id}>
               <td className={tableCellClass}><p className="font-medium text-zinc-950">{listing.domain}</p><p className="mt-1 text-xs text-slate-500">{listing.publisher_entity ?? "Independent publisher"}</p></td>
               <td className={tableCellClass}>{titleCase(listing.placement_type)}</td>
+              <td className={`${tableCellClass} font-mono text-zinc-700`}>{formatAud(listing.cost_aud)}</td>
               <td className={`${tableCellClass} font-mono font-medium text-zinc-950`}>{formatAud(listing.reseller_price_aud)}</td>
               <td className={tableCellClass}><div className="space-y-1"><StatusBadge status={isListed ? "listed" : "paused"} label={isListed ? titleCase(listing.visibility ?? "listed") : "Private"} />{!isListed && <p className="text-[11px] text-slate-500">Not visible to agencies</p>}</div></td>
               <td className={`${tableCellClass} table-number`}>{formatNumber(listing.enquiries)}</td><td className={tableCellClass}>{formatDate(listing.updated_at)}</td>

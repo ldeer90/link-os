@@ -182,10 +182,14 @@ def retire_failed_public_evidence_pilot(session: Session, *, actor: str) -> list
         select(CampaignBatch).where(
             CampaignBatch.launch_id.is_(None),
             CampaignBatch.config_version == PUBLIC_EVIDENCE_PILOT_COPY_VERSION,
-            CampaignBatch.status == CampaignBatchStatus.PAUSED,
+            CampaignBatch.status.in_([CampaignBatchStatus.PAUSED, CampaignBatchStatus.FAILED]),
         )
     ):
-        if batch.hard_bounce_count <= 0 and "bounce" not in (batch.paused_reason or ""):
+        already_retired = (
+            batch.status == CampaignBatchStatus.FAILED
+            and batch.paused_reason == "retired_after_bounce"
+        )
+        if not already_retired and batch.hard_bounce_count <= 0 and "bounce" not in (batch.paused_reason or ""):
             continue
         batch.status = CampaignBatchStatus.FAILED
         batch.active_assignment = False
@@ -201,7 +205,14 @@ def retire_failed_public_evidence_pilot(session: Session, *, actor: str) -> list
         for member in session.scalars(
             select(CampaignMember).where(CampaignMember.campaign_batch_id == batch.id)
         ):
-            if member.external_lead_id and member.external_lead_id in bounced_lead_ids:
+            member_bounced = (
+                (member.external_lead_id and member.external_lead_id in bounced_lead_ids)
+                or (
+                    member.status == CampaignMemberStatus.FAILED
+                    and "bounce" in (member.failure_reason or "")
+                )
+            )
+            if member_bounced:
                 member.status = CampaignMemberStatus.FAILED
                 member.failure_reason = "hard_bounce"
                 exists = session.scalar(
@@ -216,6 +227,25 @@ def retire_failed_public_evidence_pilot(session: Session, *, actor: str) -> list
                             contact_id=member.contact_id,
                             scope="contact",
                             reason="pilot_hard_bounce",
+                            source="instantly",
+                            permanent=True,
+                            active=True,
+                        )
+                    )
+            if member.status in {CampaignMemberStatus.CONTACTED, CampaignMemberStatus.FAILED}:
+                domain_suppressed = session.scalar(
+                    select(Suppression.id).where(
+                        Suppression.scope == "domain",
+                        Suppression.domain_id == member.domain_id,
+                        Suppression.active.is_(True),
+                    )
+                )
+                if domain_suppressed is None:
+                    session.add(
+                        Suppression(
+                            domain_id=member.domain_id,
+                            scope="domain",
+                            reason="pilot_contacted_do_not_recontact",
                             source="instantly",
                             permanent=True,
                             active=True,

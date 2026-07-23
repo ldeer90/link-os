@@ -188,6 +188,12 @@ least 0.90 and a submissions, contributor, editorial, editor, media, or
 advertising role classification. Instantly verification remains explicitly
 skipped and must be confirmed during preparation.
 
+The provider `List-Unsubscribe` header is disabled for the person-to-person
+sequence. Every step instead carries the plain-text instruction `If you'd
+prefer no more emails, just reply "stop".` Stop-on-reply remains enabled and
+reply reconciliation must permanently suppress opt-outs within five working
+days.
+
 Run `campaign-set-estimate`, then prepare with
 `prepare-campaign-set --confirm-verification-skipped --execute`. Preparation
 creates three paused campaigns, assigns three distinct healthy senders, uploads
@@ -195,10 +201,15 @@ creates three paused campaigns, assigns three distinct healthy senders, uploads
 resume outreach through the normal health gate and use
 `activate-campaign-set LAUNCH_ID --execute`.
 
-This launch pauses only the affected campaign after three hard bounces, one
-unsubscribe, or provider bounce protection. Other clean launch campaigns may
-continue. Systemic integrity failures and an entirely blocked launch retain the
-global emergency pause.
+For the currently approved segmented launch, provider bounce protection and the
+LINK OS hard-bounce pause are disabled. A hard bounce still permanently
+suppresses that exact contact and creates one idempotent, higher-priority
+`scrape_domain` recovery job. The recovery crawl excludes all suppressed
+contacts, searches only public pages for a different address, and does not spend
+Instantly verification credits. A successful replacement returns the domain to
+`email_found`; it is not automatically inserted into an active campaign.
+Domain-level suppressions and terminal deal/reply stages prevent recovery
+recrawls. Systemic integrity failures retain the global emergency pause.
 
 ## 6. Emergency Pause and Incidents
 

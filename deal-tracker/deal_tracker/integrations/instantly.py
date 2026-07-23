@@ -42,6 +42,7 @@ CAMPAIGN_NAME_MARKERS = (
 MANAGED_NAME_PREFIX = "LINK OS |"
 CAMPAIGN_COPY_VERSION = "verified-relaunch-v2.0"
 PUBLIC_EVIDENCE_PILOT_COPY_VERSION = "public-evidence-pilot-v1.0"
+REPLY_STOP_LINE = 'If you\'d prefer no more emails, just reply "stop".'
 HEALTHY_ACCOUNT_STATUS = 1
 ACTIVE_CAMPAIGN_STATUS = 1
 PAUSED_CAMPAIGN_STATUS = 2
@@ -129,19 +130,65 @@ def _step(subject: str, body: str, delay: int) -> dict[str, Any]:
 
 
 def verified_relaunch_steps(subject: str = "Article Submission Info Request") -> list[dict[str, Any]]:
-    bodies = (
-        """Hi {{firstName}},\n\nI'm Laurence Deer. I manage SEO and content promotion for Australian ecommerce stores.\n\nDoes {{site_name}} accept article submissions, sponsored articles, guest posts, advertorials, or similar editorial placements? If so, could you share the fees, topic guidelines, link requirements, and other conditions?\n\nRegards,\nLaurence\nLD Search\nldsearch.com.au\n\nIf this is not relevant, reply \"no\" and I won't follow up.""",
-        """Hi {{firstName}},\n\nJust following up. Is there a rate card, media kit, or contributor guideline page for article submissions or sponsored/editorial placements on {{site_name}}?\n\nRegards,\nLaurence""",
-        """Hi {{firstName}},\n\nWe work with Australian ecommerce brands and often need relevant sites for useful content placements. Do you accept paid article submissions or sponsored content, and what are the usual fees or requirements?\n\nRegards,\nLaurence""",
-        """Hi {{firstName}},\n\nIs there someone else who handles article submissions, advertising, or sponsored content enquiries for {{site_name}}? If so, could you point me in the right direction?\n\nRegards,\nLaurence""",
-        """Hi {{firstName}},\n\nI'm checking whether {{site_name}} offers paid editorial, guest post, sponsored article, or content placement options. A short yes/no reply would be helpful.\n\nRegards,\nLaurence""",
-        """Hi {{firstName}},\n\nLast follow-up from me. If {{site_name}} accepts paid article submissions or content placements, could you send the fees and requirements? If not, no worries.\n\nRegards,\nLaurence""",
+    paragraph_groups = (
+        (
+            "Hi {{firstName}},",
+            "I'm Laurence Deer. I manage SEO and content promotion for Australian ecommerce stores.",
+            "Does {{site_name}} accept article submissions, sponsored articles, guest posts, advertorials, or similar editorial placements?",
+            "If so, could you share the fees, topic guidelines, link requirements, and other conditions?",
+        ),
+        (
+            "Hi {{firstName}},",
+            "Just following up.",
+            "Is there a rate card, media kit, or contributor guideline page for article submissions or sponsored/editorial placements on {{site_name}}?",
+        ),
+        (
+            "Hi {{firstName}},",
+            "We work with Australian ecommerce brands and often need relevant sites for useful content placements.",
+            "Do you accept paid article submissions or sponsored content, and what are the usual fees or requirements?",
+        ),
+        (
+            "Hi {{firstName}},",
+            "Is there someone else who handles article submissions, advertising, or sponsored content enquiries for {{site_name}}?",
+            "If so, could you point me in the right direction?",
+        ),
+        (
+            "Hi {{firstName}},",
+            "I'm checking whether {{site_name}} offers paid editorial, guest post, sponsored article, or content placement options.",
+            "A short yes/no reply would be helpful.",
+        ),
+        (
+            "Hi {{firstName}},",
+            "Last follow-up from me.",
+            "If {{site_name}} accepts paid article submissions or content placements, could you send the fees and requirements?",
+            "If not, no worries.",
+        ),
     )
     # Instantly's delay is the interval before the next email, not an absolute
     # campaign day. Operator-approved gaps are 2, 3, 5, 7, 10 and 14 days;
     # the final value is retained as a non-zero terminal setting even though
     # there is no seventh step for it to schedule.
-    return [_step(subject, body, delay) for body, delay in zip(bodies, (2, 3, 5, 7, 10, 14), strict=True)]
+    return [
+        _step(
+            subject,
+            "\n\n".join((*paragraphs, "Regards,", "Laurence\nLD Search\nldsearch.com.au", REPLY_STOP_LINE)),
+            delay,
+        )
+        for paragraphs, delay in zip(paragraph_groups, (2, 3, 5, 7, 10, 14), strict=True)
+    ]
+
+
+def has_reply_stop_instruction(sequences: list[dict[str, Any]]) -> bool:
+    variants = [
+        variant
+        for sequence in sequences
+        for step in (sequence.get("steps") or [])
+        for variant in (step.get("variants") or [])
+    ]
+    return bool(variants) and all(
+        REPLY_STOP_LINE.lower() in str(variant.get("body") or "").lower()
+        for variant in variants
+    )
 
 
 TEMPLATE_TOKEN = re.compile(r"{{\s*([A-Za-z0-9_]+)\s*}}")
@@ -193,6 +240,7 @@ def safe_campaign_payload(
     subject: str = "Article Submission Info Request",
     today: str | None = None,
     limits: CampaignLimits = CampaignLimits(),
+    provider_bounce_protection_enabled: bool = True,
 ) -> dict[str, Any]:
     daily_new = limits.pilot_new_leads_daily if pilot else limits.healthy_new_leads_daily
     return {
@@ -218,12 +266,12 @@ def safe_campaign_payload(
         "first_email_text_only": True,
         "open_tracking": False,
         "link_tracking": False,
-        "insert_unsubscribe_header": True,
+        "insert_unsubscribe_header": False,
         "stop_on_reply": True,
         "stop_on_auto_reply": True,
         "stop_for_company": True,
         "allow_risky_contacts": False,
-        "disable_bounce_protect": False,
+        "disable_bounce_protect": not provider_bounce_protection_enabled,
     }
 
 
@@ -304,14 +352,21 @@ class InstantlyControl:
         *,
         name: str,
         sequences: list[dict[str, Any]],
+        insert_unsubscribe_header: bool | None = None,
+        disable_bounce_protect: bool | None = None,
     ) -> dict[str, Any]:
         before = self.get_campaign(campaign_id)
         if before.get("status") in {ACTIVE_CAMPAIGN_STATUS, 4}:
             raise RuntimeError("Campaign copy cannot be changed while active")
+        patch: dict[str, Any] = {"name": name, "sequences": sequences}
+        if insert_unsubscribe_header is not None:
+            patch["insert_unsubscribe_header"] = insert_unsubscribe_header
+        if disable_bounce_protect is not None:
+            patch["disable_bounce_protect"] = disable_bounce_protect
         self._request(
             f"/campaigns/{campaign_id}",
             method="PATCH",
-            body={"name": name, "sequences": sequences},
+            body=patch,
         )
         readback = self.get_campaign(campaign_id)
         if readback.get("status") in {ACTIVE_CAMPAIGN_STATUS, 4}:
@@ -322,6 +377,10 @@ class InstantlyControl:
             != sequence_signature(sequences)
         ):
             raise RuntimeError("Campaign copy readback did not match the requested sequence")
+        if insert_unsubscribe_header is False and readback.get("insert_unsubscribe_header") is True:
+            raise RuntimeError("Campaign unsubscribe-header readback remained enabled")
+        if disable_bounce_protect is True and readback.get("disable_bounce_protect") is not True:
+            raise RuntimeError("Campaign bounce-protection readback remained enabled")
         return readback
 
     def send_test_email(

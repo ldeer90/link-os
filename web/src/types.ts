@@ -218,6 +218,8 @@ export interface Campaign {
   segment?: "au_publishers" | "travel_global" | string | null;
   hard_bounce_count?: number;
   hard_bounce_limit?: number;
+  ignore_hard_bounces?: boolean;
+  provider_bounce_protection_disabled?: boolean;
   unsubscribe_count?: number;
 }
 
@@ -255,8 +257,12 @@ export interface Listing {
   domain: string;
   status: string;
   visibility?: string;
+  publisher_cost?: number | null;
+  publisher_currency?: string | null;
+  cost_aud?: number | null;
   reseller_price_aud?: number | null;
   placement_type?: string;
+  pricing_rule_version?: string | null;
   publisher_entity?: string;
   enquiries?: number;
   updated_at?: string;

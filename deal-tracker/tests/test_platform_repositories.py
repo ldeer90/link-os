@@ -17,7 +17,9 @@ from deal_tracker.platform.models import (
     Base,
     CampaignMember,
     Contact,
+    Domain,
     DomainContactEvidence,
+    Suppression,
     VerificationResult,
 )
 from deal_tracker.platform.repositories import (
@@ -331,3 +333,70 @@ def test_public_evidence_policy_skips_verification_but_requires_strong_evidence(
     assert created
     assert batch.settings_snapshot["contact_policy"] == "public_evidence_verification_skipped"
     assert domain.lifecycle_stage == LifecycleStage.CAMPAIGN_QUEUED
+
+
+def test_contact_suppression_does_not_suppress_an_alternate_email_for_domain(
+    session: Session,
+) -> None:
+    domain = Domain(
+        normalized_domain="alternate.example",
+        first_input_value="alternate.example",
+        tld="example",
+        lifecycle_stage=LifecycleStage.EMAIL_FOUND,
+    )
+    bounced = Contact(
+        normalized_email="dead@alternate.example",
+        original_email="dead@alternate.example",
+        email_domain="alternate.example",
+    )
+    alternate = Contact(
+        normalized_email="editor@alternate.example",
+        original_email="editor@alternate.example",
+        email_domain="alternate.example",
+    )
+    session.add_all([domain, bounced, alternate])
+    session.flush()
+    session.add_all(
+        [
+            Suppression(
+                domain_id=domain.id,
+                contact_id=bounced.id,
+                scope="contact",
+                reason="instantly_bounced",
+                source="instantly",
+                permanent=True,
+                active=True,
+            ),
+            DomainContactEvidence(
+                domain_id=domain.id,
+                contact_id=bounced.id,
+                evidence_key="bounced-evidence",
+                source_url="https://alternate.example/contact",
+                is_public_page=True,
+                confidence=0.95,
+            ),
+            DomainContactEvidence(
+                domain_id=domain.id,
+                contact_id=alternate.id,
+                evidence_key="alternate-evidence",
+                source_url="https://alternate.example/editorial",
+                is_public_page=True,
+                confidence=0.95,
+            ),
+        ]
+    )
+    session.flush()
+
+    repository = CampaignRepository(session)
+    assert "suppressed" in repository.eligibility_reasons(
+        domain.id,
+        bounced.id,
+        contact_policy="public_evidence_verification_skipped",
+        now=NOW,
+    )
+    assert "suppressed" not in repository.eligibility_reasons(
+        domain.id,
+        alternate.id,
+        contact_policy="public_evidence_verification_skipped",
+        now=NOW,
+    )

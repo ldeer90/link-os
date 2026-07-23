@@ -110,7 +110,7 @@ def _safe_campaign() -> CampaignUploadSnapshot:
         built_paused=True,
         pending_verifications=0,
         tracking_enabled=False,
-        unsubscribe_header_enabled=True,
+        unsubscribe_method_present=True,
         stop_on_reply=True,
         stop_on_auto_reply=True,
         stop_on_company_reply=True,
@@ -166,7 +166,7 @@ def test_campaign_gate_fails_closed_on_pause_unknown_health_or_upload_mismatch()
     assert "upload_count_mismatch" in decision.reasons
 
 
-def test_reseller_formula_uses_greater_rule_and_rounds_up_to_ten() -> None:
+def test_reseller_formula_uses_exact_40_percent_markup() -> None:
     low_cost = calculate_reseller_price(
         amount=Decimal("100"),
         currency="AUD",
@@ -174,7 +174,7 @@ def test_reseller_formula_uses_greater_rule_and_rounds_up_to_ten() -> None:
         fx_rate_date=date(2026, 7, 15),
     )
     assert low_cost.cost_aud == Decimal("100.00")
-    assert low_cost.reseller_price_aud == Decimal("200.00")
+    assert low_cost.reseller_price_aud == Decimal("140.00")
 
     high_cost = calculate_reseller_price(
         amount=Decimal("331"),
@@ -182,7 +182,7 @@ def test_reseller_formula_uses_greater_rule_and_rounds_up_to_ten() -> None:
         fx_rate_to_aud=Decimal("1"),
         fx_rate_date=date(2026, 7, 15),
     )
-    assert high_cost.reseller_price_aud == Decimal("500.00")
+    assert high_cost.reseller_price_aud == Decimal("463.40")
 
 
 def test_offer_auto_approval_rejects_ambiguous_multi_price_reply() -> None:

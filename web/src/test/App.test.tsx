@@ -396,13 +396,17 @@ describe("LINK OS console", () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const { url } = requestDetails(input, init);
       if (url.endsWith("/api/v1/health")) return json(healthySystem);
-      if (url.includes("/api/v1/listings")) return json({ items: [{ id: 72, domain: "quietpublisher.com", status: "private", visibility: "private", reseller_price_aud: 420, placement_type: "guest_post", enquiries: 0 }] });
+      if (url.includes("/api/v1/listings")) return json({ items: [{ id: 72, domain: "quietpublisher.com", status: "private", visibility: "private", cost_aud: 247, reseller_price_aud: 420, placement_type: "guest_post", enquiries: 0 }] });
       return json({ detail: "not found" }, 404);
     });
     vi.stubGlobal("fetch", fetchMock);
     renderRoute("/inventory");
 
     expect(await screen.findByText("quietpublisher.com")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Cost to You (AUD)" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Resell Price (Cost + 40%)" })).toBeInTheDocument();
+    expect(screen.getByText("$247")).toBeInTheDocument();
+    expect(screen.getByText("$420")).toBeInTheDocument();
     expect(screen.getByText("Not visible to agencies")).toBeInTheDocument();
     expect(screen.getAllByText("Private").length).toBeGreaterThan(0);
   });

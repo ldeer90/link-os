@@ -168,7 +168,7 @@ export function CampaignsPage() {
                     <td className={`${tableCellClass} font-mono text-xs`}>{campaign.sender_email ?? "Waiting for capacity"}</td>
                     <td className={`${tableCellClass} table-number`}>{formatNumber(campaign.uploaded_count ?? campaign.member_count)} / {formatNumber(campaign.member_count)}</td>
                     <td className={`${tableCellClass} table-number`}>{formatNumber(campaign.reply_count)}</td>
-                    <td className={`${tableCellClass} table-number`}><p>{formatNumber(campaign.hard_bounce_count)} / {formatNumber(campaign.hard_bounce_limit ?? 3)}</p>{campaign.status === "active" && <Button type="button" onClick={() => void handlePauseCampaign(campaign.id)} variant="danger" className="mt-2">Pause</Button>}</td>
+                    <td className={`${tableCellClass} table-number`}><p className={campaign.ignore_hard_bounces ? "font-semibold text-rose-700" : undefined}>{campaign.ignore_hard_bounces ? "Ignored" : `${formatNumber(campaign.hard_bounce_count)} / ${formatNumber(campaign.hard_bounce_limit ?? 3)}`}</p>{campaign.provider_bounce_protection_disabled && <p className="mt-1 text-[11px] text-rose-700">Provider protection off</p>}{campaign.status === "active" && <Button type="button" onClick={() => void handlePauseCampaign(campaign.id)} variant="danger" className="mt-2">Pause</Button>}</td>
                   </tr>
                 ))}
               </tbody>

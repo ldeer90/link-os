@@ -128,8 +128,12 @@ class LegacySchemaMonday(FakeMonday):
                 _status_column("Deal Status", "confirmed", "needs_review"),
                 _status_column("Placement Type", *placement_labels),
                 {"id": "Publisher Cost", "title": "Publisher Cost", "type": "numbers"},
-                _status_column("Publisher Currency", "AUD", "USD"),
+                _status_column("Publisher Currency", "AUD", "USD", "GBP"),
                 {"id": "Reseller Price", "title": "Reseller Price", "type": "numbers"},
+                _status_column("Reseller Currency", "AUD"),
+                {"id": "Link Insert Cost", "title": "Link Insert Cost", "type": "numbers"},
+                _status_column("Link Insert Currency", "AUD", "USD", "GBP"),
+                {"id": "Link Insert Reseller", "title": "Link Insert Reseller", "type": "numbers"},
                 _status_column("Review Status", "approved", "needs_review"),
                 {"id": "Local Deal ID", "title": "Local Deal ID", "type": "numbers"},
                 {"id": "Last Seen", "title": "Last Seen", "type": "date"},
@@ -326,6 +330,10 @@ def test_live_legacy_schema_is_preflighted_and_safely_translated() -> None:
         assert inventory["Deal Status"] == {"label": "confirmed"}
         assert inventory["Placement Type"] == {"label": "guest_post"}
         assert inventory["Publisher Currency"] == {"label": "AUD"}
+        assert inventory["Reseller Currency"] == {"label": "AUD"}
+        assert inventory["Link Insert Cost"] == ""
+        assert inventory["Link Insert Currency"] == ""
+        assert inventory["Link Insert Reseller"] == ""
         assert inventory["Review Status"] == {"label": "approved"}
         assert "Local Deal ID" not in inventory
         sync = next(values for board, _name, values in fake.created if board == "board-4")

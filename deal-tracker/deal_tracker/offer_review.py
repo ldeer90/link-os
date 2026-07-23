@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable
 
 from deal_tracker.crawler import registrable_domain
+from deal_tracker.platform.pricing import (
+    PRICING_RULE_VERSION,
+    reseller_price_from_cost_aud,
+)
 
 
-PRICING_RULE_VERSION = "reseller-floor-v1"
 PRICE_PATTERNS = (
     re.compile(r"\b(?P<currency>AUD|USD|NZD|CAD|GBP|EUR)\s*\$?\s*(?P<amount>\d+(?:[.,]\d{1,2})?)", re.I),
     re.compile(r"(?P<symbol>[$£€])\s*(?P<amount>\d+(?:[.,]\d{1,2})?)\s*(?P<currency>AUD|USD|NZD|CAD|GBP|EUR)\b", re.I),
@@ -126,6 +128,4 @@ def evaluate_offer(
 
 def reseller_price_aud(cost_amount: Decimal | float | int, fx_to_aud: Decimal | float | int) -> Decimal:
     cost_aud = Decimal(str(cost_amount)) * Decimal(str(fx_to_aud))
-    raw = max(cost_aud * Decimal("1.5"), cost_aud + Decimal("100"))
-    return Decimal(math.ceil(raw / Decimal("10")) * 10)
-
+    return reseller_price_from_cost_aud(cost_aud)

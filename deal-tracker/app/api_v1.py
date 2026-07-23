@@ -31,6 +31,7 @@ from deal_tracker.backlink_discovery import (
 from deal_tracker.integrations.instantly import HISTORICAL_LINK_BUILDING_CAMPAIGN_IDS, InstantlyControl, matching_campaigns, sender_is_healthy
 from deal_tracker.integrations.monday import DealsOnlyProjector
 from deal_tracker.integrations.seranking import SERankingClient, SERankingError
+from deal_tracker.inventory import ensure_private_listing
 from deal_tracker.migration_importer import import_migration_records
 from deal_tracker.platform.enums import BacklinkCandidateStatus, CampaignBatchStatus, CampaignLaunchStatus, JobStatus, LifecycleStage, ListingStatus, OfferStatus, ScrapeStatus, VerificationStatus
 from deal_tracker.platform.models import (
@@ -1942,7 +1943,8 @@ def campaigns(limit: int = 100, session: Session = Depends(db_session)) -> dict[
     items = []
     for row in rows:
         sender = session.get(SenderAccount, row.sender_account_id) if row.sender_account_id else None
-        items.append({**row_dict(row), "managed": row.managed_by_link_os, "member_count": row.expected_member_count, "uploaded_count": row.uploaded_member_count, "sender_email": sender.sender_email if sender else None, "blocking_reasons": [row.paused_reason] if row.paused_reason else [], "hard_bounce_limit": int((row.settings_snapshot or {}).get("hard_bounce_limit") or 3)})
+        settings = row.settings_snapshot or {}
+        items.append({**row_dict(row), "managed": row.managed_by_link_os, "member_count": row.expected_member_count, "uploaded_count": row.uploaded_member_count, "sender_email": sender.sender_email if sender else None, "blocking_reasons": [row.paused_reason] if row.paused_reason else [], "hard_bounce_limit": int(settings.get("hard_bounce_limit") or 3), "ignore_hard_bounces": settings.get("ignore_hard_bounces") is True, "provider_bounce_protection_disabled": settings.get("provider_bounce_protection_disabled") is True})
     return {"items": items, "count": len(rows), "total": len(rows), "outreach_paused": _pause_setting(session)}
 
 
@@ -2217,8 +2219,11 @@ def offers(status: str = "", limit: int = 100, session: Session = Depends(db_ses
         domain = session.get(Domain, row.domain_id)
         reply = session.get(Reply, row.reply_id)
         contact = session.get(Contact, reply.contact_id) if reply and reply.contact_id else None
-        listed = session.scalar(select(CatalogueListing.id).where(CatalogueListing.offer_id == row.id)) is not None
-        items.append({**row_dict(row), "domain": domain.normalized_domain if domain else "Unknown domain", "publisher_email": contact.normalized_email if contact else None, "confidence": row.extraction_confidence, "evidence": (reply.body_text or "")[:500] if reply else "", "private": not listed, "listed": listed})
+        listing = session.scalar(
+            select(CatalogueListing).where(CatalogueListing.offer_id == row.id)
+        )
+        listed = listing is not None and listing.status == ListingStatus.LISTED
+        items.append({**row_dict(row), "domain": domain.normalized_domain if domain else "Unknown domain", "publisher_email": contact.normalized_email if contact else None, "confidence": row.extraction_confidence, "evidence": (reply.body_text or "")[:500] if reply else "", "private": not listed, "listed": listed, "listing_id": listing.id if listing else None})
     return {"items": items, "count": len(rows), "total": len(rows)}
 
 
@@ -2234,6 +2239,7 @@ async def update_offer(
         raise HTTPException(status_code=404, detail="Offer not found")
     payload = await request.json()
     before = row_dict(offer)
+    listing: CatalogueListing | None = None
     if "status" in payload:
         try:
             offer.status = OfferStatus(str(payload["status"]))
@@ -2242,6 +2248,7 @@ async def update_offer(
         if offer.status == OfferStatus.APPROVED:
             offer.approved_at = utcnow()
             offer.approved_by = str(admin.get("email") or admin.get("id"))
+            listing = ensure_private_listing(session, offer)
         elif offer.status in {OfferStatus.REJECTED, OfferStatus.LOST}:
             listing = session.scalar(
                 select(CatalogueListing).where(CatalogueListing.offer_id == offer.id)
@@ -2252,7 +2259,7 @@ async def update_offer(
     if payload.get("list") is True:
         if offer.status != OfferStatus.APPROVED or offer.reseller_price_aud is None:
             raise HTTPException(status_code=409, detail="Only approved, priced offers can be listed")
-        listing = session.scalar(select(CatalogueListing).where(CatalogueListing.offer_id == offer.id))
+        listing = listing or session.scalar(select(CatalogueListing).where(CatalogueListing.offer_id == offer.id))
         if listing is None:
             listing = CatalogueListing(
                 offer_id=offer.id,
@@ -2266,6 +2273,15 @@ async def update_offer(
             session.add(listing)
         else:
             listing.status = ListingStatus.LISTED
+            listing.visibility_tier = str(
+                payload.get("visibility_tier")
+                or (
+                    listing.visibility_tier
+                    if listing.visibility_tier != "private"
+                    else "basic"
+                )
+            )
+            listing.agency_price_aud = offer.reseller_price_aud
             listing.listed_at = utcnow()
     session.add(
         AuditLog(
@@ -2296,7 +2312,14 @@ def listings(limit: int = 200, session: Session = Depends(db_session)) -> dict[s
     for row in rows:
         domain = session.get(Domain, row.domain_id)
         offer = session.get(Offer, row.offer_id)
-        items.append({**row_dict(row), "domain": domain.normalized_domain if domain else "Unknown domain", "visibility": row.status.value, "reseller_price_aud": row.agency_price_aud, "placement_type": offer.placement_type if offer else None, "enquiries": 0})
+        cost_aud = offer.cost_aud if offer else None
+        if (
+            cost_aud is None
+            and offer
+            and offer.original_currency == "AUD"
+        ):
+            cost_aud = offer.original_amount
+        items.append({**row_dict(row), "domain": domain.normalized_domain if domain else "Unknown domain", "visibility": row.status.value, "publisher_cost": offer.original_amount if offer else None, "publisher_currency": offer.original_currency if offer else None, "cost_aud": cost_aud, "reseller_price_aud": row.agency_price_aud, "placement_type": offer.placement_type if offer else None, "pricing_rule_version": offer.pricing_rule_version if offer else None, "enquiries": 0})
     return {"items": items, "count": len(rows), "total": len(rows), "private_by_default": True}
 
 
